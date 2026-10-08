@@ -51,6 +51,9 @@ pub async fn run() -> String {
         ok: gh,
         detail: if gh { "configured".into() } else { "optional: higher rate limits and code search".into() },
     });
+    let installed = crate::skill::install_dir().and_then(|d| std::fs::read_to_string(d.join("SKILL.md")).ok());
+    let (ok, detail) = crate::skill::status(installed.as_deref(), &crate::skill::detect());
+    checks.push(Check { name: "agent skill (Claude Code)", ok, detail });
     render(&checks)
 }
 
