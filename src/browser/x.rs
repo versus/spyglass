@@ -13,7 +13,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 pub const LOGIN_URL: &str = "https://x.com/i/flow/login";
-pub const SITE: Site = Site { allow: Allow::Domains(&["x.com", "twitter.com", "twimg.com"]), scratch: false };
+pub const SITE: Site = Site { allow: Allow::Domains(&["x.com", "twitter.com", "twimg.com"]), scratch: false, visible: true };
 const SESSION_COOKIE: (&str, &str) = ("https://x.com", "auth_token");
 const LOGIN_WAIT: Duration = Duration::from_secs(300);
 const DATA_WAIT: Duration = Duration::from_secs(25);

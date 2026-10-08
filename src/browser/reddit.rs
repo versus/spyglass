@@ -10,7 +10,8 @@ use crate::output::{oneline, str_at as s};
 use crate::validate::{self, enc};
 
 pub const LOGIN_URL: &str = "https://www.reddit.com/login/";
-pub const SITE: Site = Site { allow: Allow::Domains(&["reddit.com", "redditstatic.com", "redditmedia.com"]), scratch: false };
+pub const SITE: Site =
+    Site { allow: Allow::Domains(&["reddit.com", "redditstatic.com", "redditmedia.com"]), scratch: false, visible: true };
 pub const BLOCKED_MARKER: &str = "blocked by network security";
 pub const SEARCH_READY: &str = r#"a[data-testid="post-title"]"#;
 /// Comments render after the post; a post without comments has nothing more to wait for.

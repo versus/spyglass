@@ -17,6 +17,8 @@ pub struct Site {
     pub allow: Allow,
     /// The cookie-less context (arbitrary pages) instead of the logged-in profile.
     pub scratch: bool,
+    /// Needs the visible browser: the site blocks headless ones.
+    pub visible: bool,
 }
 
 /// Everything a scenario gets: the browser, its agent tab, and a channel to the agent.
@@ -27,6 +29,18 @@ pub struct Ctx<'a> {
     /// No window: nobody can solve a captcha or log in.
     pub headless: bool,
 }
+
+/// The page is a bot wall: the daemon retries in the visible browser.
+#[derive(Debug)]
+pub struct Blocked(pub String);
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} blocked the headless browser", self.0)
+    }
+}
+
+impl std::error::Error for Blocked {}
 
 /// What every scenario returns.
 pub struct Found {
@@ -83,6 +97,19 @@ pub async fn ask_user(notify: &mpsc::Sender<Reply>, message: &str) {
     let args = ["--app-name=spyglass", "--", "spyglass", message];
     let _ = crate::tools::run_with("notify-send", &args, Duration::from_secs(5), 1024, &session).await;
     let _ = notify.send(Reply::Waiting { message: message.to_string() }).await;
+}
+
+/// A captcha or bot check is in the way: bring the tab to the user, then poll `check`
+/// until it yields (the check passed) or two minutes elapse.
+pub async fn solve_by_user<T, F, Fut>(ctx: &Ctx<'_>, what: &str, check: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    require_visible(ctx.headless, what)?;
+    ctx.tab.focus().await?;
+    ask_user(ctx.notify, &format!("{what}: please complete it in the agent browser window (waiting up to 120s).")).await;
+    wait_until(Duration::from_secs(120), check).await.with_context(|| format!("{what} was not completed in time"))
 }
 
 /// Poll `check` every 2 s until it yields a value or `wait` elapses.

@@ -66,7 +66,9 @@ No Python runtime, no Node.js, no Docker for spyglass itself. See [Requirements]
 
 ## The agent browser
 
-Search (DuckDuckGo), Reddit and X run in a **visible** Chrome window with its own profile
+Pages are tried in a **headless** Chrome first (no window). Sites that block headless browsers
+(Reddit, X, DuckDuckGo search and a few others, plus any site that showed a bot check this session)
+run in a **visible** Chrome window with its own profile
 (`~/.local/share/spyglass/browser-profile`), started on demand. You can watch what
 the agent does and log in where needed:
 
