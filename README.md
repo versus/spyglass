@@ -71,7 +71,7 @@ Audit log (no secrets, no bodies): `~/.local/state/spyglass/audit.jsonl`.
 ## Development
 
 TDD, KISS, YAGNI, DRY. `cargo test` (no network), `cargo clippy --all-targets -- -D warnings`,
-`cargo test -- --ignored` runs the real-Chrome test. Plan: `PLAN.md`; MVP criteria: `MVP.md`.
+`cargo test -- --ignored` runs the real-Chrome test.
 
 ## License
 
