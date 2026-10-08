@@ -11,6 +11,7 @@ fn spyglass(args: &[&str], state_dir: &std::path::Path) -> Output {
         .env("SPYGLASS_BRAVE_API_KEY", MARKER)
         .env("SPYGLASS_EXA_API_KEY", MARKER)
         .env("XDG_STATE_HOME", state_dir)
+        .env("HOME", state_dir)
         .output()
         .expect("run spyglass")
 }
@@ -38,7 +39,9 @@ fn secrets_never_appear_in_output_or_audit_log() {
         assert!(!text(o).contains(MARKER), "secret leaked: {}", text(o));
     }
     assert!(text(&runs[0]).contains("github-token   set"));
-    let audit = std::fs::read_to_string(state.join("spyglass/audit.jsonl")).unwrap();
+    // Linux: $XDG_STATE_HOME/spyglass; macOS has no XDG state dir: ~/Library/Application Support/spyglass.
+    let dir = if cfg!(target_os = "macos") { state.join("Library/Application Support") } else { state.clone() };
+    let audit = std::fs::read_to_string(dir.join("spyglass/audit.jsonl")).unwrap();
     assert_eq!(audit.lines().count(), runs.len());
     assert!(!audit.contains(MARKER));
     std::fs::remove_dir_all(state).unwrap();

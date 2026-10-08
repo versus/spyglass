@@ -66,7 +66,7 @@ Use a dedicated account: automation is against the platforms' terms and accounts
 | Secret leaks | OS keyring; secrets only in request headers; tests assert they never reach output or the audit log |
 | Supply chain | `Cargo.lock`, `cargo-deny`, SHA-pinned CI actions, no remote instructions, no self-update |
 
-Audit log (no secrets, no bodies): `~/.local/state/spyglass/audit.jsonl`.
+Audit log (no secrets, no bodies): `~/.local/state/spyglass/audit.jsonl` (macOS: `~/Library/Application Support/spyglass/audit.jsonl`).
 
 ## Development
 
