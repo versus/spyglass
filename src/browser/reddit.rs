@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use super::scenario::{Ctx, Found, Site, arg_str, arg_usize, scrape, when_ready};
+use super::scenario::{Ctx, Found, Site, arg_str, arg_usize, scrape, solve_by_user, when_ready};
 use super::tab::Allow;
 use crate::output::{oneline, str_at as s};
 use crate::validate::{self, enc};
@@ -13,6 +13,8 @@ pub const LOGIN_URL: &str = "https://www.reddit.com/login/";
 pub const SITE: Site =
     Site { allow: Allow::Domains(&["reddit.com", "redditstatic.com", "redditmedia.com"]), scratch: false, visible: true };
 pub const BLOCKED_MARKER: &str = "blocked by network security";
+/// Title of Reddit's bot check; a person can pass it in the visible window.
+pub const CHALLENGE_TITLE: &str = "Prove your humanity";
 pub const SEARCH_READY: &str = r#"a[data-testid="post-title"]"#;
 /// Comments render after the post; a post without comments has nothing more to wait for.
 pub const POST_READY: &str = r#"shreddit-comment, shreddit-post[comment-count="0"]"#;
@@ -174,8 +176,20 @@ pub async fn job(ctx: &Ctx<'_>, verb: &str, args: &Value) -> Result<Found> {
         "post" => (post_url(arg_str(args, "post")?)?, POST_READY, POST_JS),
         _ => bail!("unknown reddit command {verb}"),
     };
-    let script = when_ready(ready, BLOCKED_MARKER, script);
-    let v = scrape(ctx.tab, &url, &script).await?;
+    let script =
+        format!("document.title.includes({CHALLENGE_TITLE:?}) ? {{ challenge: true }} : {}", when_ready(ready, BLOCKED_MARKER, script));
+    let mut v = scrape(ctx.tab, &url, &script).await?;
+    if v["challenge"] == true {
+        // After the check Reddit may not return to our URL, so reload it once the title changes.
+        v = solve_by_user(ctx, "A Reddit bot check", || async {
+            let title = ctx.tab.eval("document.title").await.ok()?;
+            if title.as_str().unwrap_or(CHALLENGE_TITLE).contains(CHALLENGE_TITLE) {
+                return None;
+            }
+            scrape(ctx.tab, &url, &script).await.ok().filter(|v| v["challenge"] != true)
+        })
+        .await?;
+    }
     if v["blocked"] == true {
         bail!(
             "Reddit blocked the agent browser. Use the visible mode (`spyglass browser start`) or log in: `spyglass browser login reddit`"
