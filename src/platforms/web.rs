@@ -4,19 +4,27 @@ use anyhow::{Result, bail};
 use dom_smoothie::Readability;
 use serde_json::json;
 
-use crate::net::{DEFAULT_MAX_BYTES, Net};
+use crate::net::Net;
 use crate::output::Doc;
 
+/// PDFs are larger than pages.
+const MAX_PAGE_BYTES: usize = 20 * 1024 * 1024;
+
 pub async fn read(net: &Net, url: &str) -> Result<Doc> {
-    let page = net.get(url, &[("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8")], DEFAULT_MAX_BYTES).await?;
+    let accept = "text/html,application/xhtml+xml,application/pdf,text/plain;q=0.8";
+    let page = net.get(url, &[("Accept", accept)], MAX_PAGE_BYTES).await?;
     let final_url = page.url.to_string();
+    if is_pdf(&page.content_type, &page.bytes) {
+        return pdf_to_doc(&page.bytes, &final_url);
+    }
+    let text = page.text();
     if page.content_type.starts_with("text/plain") || page.content_type.starts_with("text/markdown") {
-        return Ok(Doc::new("web", Some(final_url), page.body.clone(), json!({ "text": page.body })));
+        return Ok(Doc::new("web", Some(final_url), text.clone(), json!({ "text": text })));
     }
     if !page.content_type.is_empty() && !page.content_type.contains("html") {
         bail!("unsupported content type: {}", page.content_type);
     }
-    Ok(with_hint(extract(&page.body, &final_url)?, false))
+    Ok(with_hint(extract(&text, &final_url)?, false))
 }
 
 /// Append the thin-result note, if any, to the Markdown the agent sees.
@@ -66,6 +74,45 @@ fn whole_page(html: &str, url: &str) -> Doc {
     let body = html_to_markdown(&page.select("body").inner_html());
     let markdown = if title.is_empty() { body.clone() } else { format!("# {title}\n\n{body}") };
     Doc::new("web", Some(url.to_string()), markdown, json!({ "title": title, "extraction": "page", "markdown": body }))
+}
+
+pub fn is_pdf(content_type: &str, bytes: &[u8]) -> bool {
+    content_type.starts_with("application/pdf") || bytes.starts_with(b"%PDF-")
+}
+
+/// Text of a PDF, page by page. Parsing untrusted PDFs runs on its own thread with a time
+/// limit, and a parser panic becomes an error instead of taking the process down.
+pub fn pdf_to_doc(bytes: &[u8], url: &str) -> Result<Doc> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let data = bytes.to_vec();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(pdf_extract::extract_text_from_mem_by_pages(&data));
+    });
+    let pages = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(Ok(pages)) => pages,
+        Ok(Err(e)) => bail!("could not read the PDF: {e}"),
+        Err(RecvTimeoutError::Timeout) => bail!("reading the PDF took longer than 30s"),
+        Err(RecvTimeoutError::Disconnected) => bail!("could not read the PDF (the parser failed)"),
+    };
+    let name = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.path_segments()?.next_back().filter(|s| !s.is_empty()).map(str::to_string))
+        .unwrap_or_else(|| "document.pdf".into());
+    let texts: Vec<&str> = pages.iter().map(|p| p.trim()).collect();
+    let body = if texts.len() == 1 {
+        texts[0].to_string()
+    } else {
+        texts
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_empty())
+            .map(|(i, t)| format!("## Page {}\n\n{t}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let data = json!({ "title": name, "extraction": "pdf", "pages": pages.len(), "markdown": body });
+    Ok(Doc::new("web", Some(url.to_string()), format!("# {name}\n\n{body}"), data))
 }
 
 /// A note for the agent when little text came out (likely a JS-rendered page).
@@ -142,6 +189,27 @@ its community, the compiler, the standard library, and the ecosystem of crates t
         let icons =
             extract(&LISTING.replace("<main>", r#"<main><a href="/vote"><img src="up.gif"></a>"#), "https://shop.example.com/").unwrap();
         assert!(!icons.markdown.contains("[]("), "{}", icons.markdown);
+    }
+
+    #[test]
+    fn reads_pdf_text() {
+        let doc = pdf_to_doc(include_bytes!("fixtures/hello.pdf"), "https://e.com/papers/hello.pdf").unwrap();
+        assert!(doc.markdown.contains("Hello PDF World"), "{}", doc.markdown);
+        assert!(doc.markdown.starts_with("# hello.pdf"));
+        assert_eq!(doc.data["extraction"], "pdf");
+        assert_eq!(doc.data["pages"], 1);
+    }
+
+    #[test]
+    fn broken_pdf_is_an_error_not_a_crash() {
+        assert!(pdf_to_doc(b"%PDF-1.4\n1 0 obj << garbage", "https://e.com/x.pdf").is_err());
+    }
+
+    #[test]
+    fn recognizes_pdf_by_type_or_signature() {
+        assert!(is_pdf("application/pdf", b""));
+        assert!(is_pdf("application/octet-stream", b"%PDF-1.7 ..."));
+        assert!(!is_pdf("text/html", b"<html>"));
     }
 
     #[test]

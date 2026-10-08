@@ -32,7 +32,7 @@ impl<'a> GitHub<'a> {
     async fn get_raw(&self, path: &str, accept: &'static str, max: usize) -> Result<String> {
         let headers = self.headers(accept);
         let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        Ok(self.net.get(&format!("{API}{path}"), &refs, max).await?.body)
+        Ok(self.net.get(&format!("{API}{path}"), &refs, max).await?.text())
     }
 
     async fn get(&self, path: &str) -> Result<Value> {

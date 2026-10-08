@@ -9,7 +9,8 @@ use crate::platforms::web::html_to_markdown;
 
 pub async fn read(net: &Net, url: &str, limit: usize) -> Result<Doc> {
     let feed = net.get(url, &[("Accept", "application/rss+xml,application/atom+xml,application/xml,*/*;q=0.5")], DEFAULT_MAX_BYTES).await?;
-    parse(feed.body.as_bytes(), feed.url.as_str(), limit)
+    // Raw bytes: the parser honours the encoding declared in the XML.
+    parse(&feed.bytes, feed.url.as_str(), limit)
 }
 
 pub fn parse(bytes: &[u8], url: &str, limit: usize) -> Result<Doc> {

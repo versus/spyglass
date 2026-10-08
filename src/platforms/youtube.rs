@@ -54,7 +54,7 @@ pub async fn transcript(net: &Net, input: &str, langs: &[String]) -> Result<Doc>
     let Some(track) = pick_track(&v, &langs) else {
         bail!("no subtitles in {:?} for this video (available: {})", langs, available_langs(&v));
     };
-    let raw = net.get(&track.url, &[], 10 * 1024 * 1024).await?.body;
+    let raw = net.get(&track.url, &[], 10 * 1024 * 1024).await?.text();
     let lines = if track.ext == "json3" { parse_json3(&raw)? } else { parse_vtt(&raw) };
     let text = paragraphs(&lines);
     let title = v["title"].as_str().unwrap_or("");

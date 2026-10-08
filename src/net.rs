@@ -22,7 +22,14 @@ const USER_AGENT: &str = concat!("spyglass/", env!("CARGO_PKG_VERSION"));
 pub struct Fetched {
     pub url: Url,
     pub content_type: String,
-    pub body: String,
+    /// Raw body (PDFs are binary); `text()` for everything else.
+    pub bytes: Vec<u8>,
+}
+
+impl Fetched {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
 }
 
 pub struct Net {
@@ -80,13 +87,13 @@ impl Net {
     pub async fn get_json(&self, url: &str, headers: &[(&str, &str)]) -> Result<Value> {
         let req = with_headers(self.api.get(self.target(url)?), headers);
         let fetched = self.send(req, DEFAULT_MAX_BYTES).await?;
-        serde_json::from_str(&fetched.body).context("response is not valid JSON")
+        serde_json::from_slice(&fetched.bytes).context("response is not valid JSON")
     }
 
     pub async fn post_json(&self, url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value> {
         let req = with_headers(self.api.post(self.target(url)?).json(body), headers);
         let fetched = self.send(req, DEFAULT_MAX_BYTES).await?;
-        serde_json::from_str(&fetched.body).context("response is not valid JSON")
+        serde_json::from_slice(&fetched.bytes).context("response is not valid JSON")
     }
 
     async fn send(&self, req: reqwest::RequestBuilder, max_bytes: usize) -> Result<Fetched> {
@@ -96,12 +103,11 @@ impl Net {
         let content_type =
             resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
         let bytes = read_capped(resp.bytes_stream(), max_bytes).await?;
-        let body = String::from_utf8_lossy(&bytes).into_owned();
         if !status.is_success() {
-            let excerpt: String = body.chars().take(300).collect();
+            let excerpt: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
             bail!("HTTP {status} from {}: {}", url.host_str().unwrap_or(""), excerpt.trim());
         }
-        Ok(Fetched { url, content_type, body })
+        Ok(Fetched { url, content_type, bytes })
     }
 }
 
