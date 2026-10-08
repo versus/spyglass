@@ -300,7 +300,13 @@ async fn ddg_search(tab: &Tab, args: &Value, notify: &mpsc::Sender<Reply>) -> Re
 
 /// Tell the user (desktop notification + the agent's stderr) that the browser needs them.
 async fn ask_user(notify: &mpsc::Sender<Reply>, message: &str) {
-    let _ = crate::tools::run("notify-send", &["--app-name=spyglass", "--", "spyglass", message], Duration::from_secs(5), 1024).await;
+    // notify-send needs the session bus and display; nothing else is passed.
+    let session = crate::tools::Extra {
+        pass_env: &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"],
+        ..Default::default()
+    };
+    let args = ["--app-name=spyglass", "--", "spyglass", message];
+    let _ = crate::tools::run_with("notify-send", &args, Duration::from_secs(5), 1024, &session).await;
     let _ = notify.send(Reply::Waiting { message: message.to_string() }).await;
 }
 

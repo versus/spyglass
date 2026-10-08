@@ -68,3 +68,19 @@ fn write_commands_do_not_exist() {
     }
     std::fs::remove_dir_all(state).unwrap();
 }
+
+#[test]
+fn closed_stdout_is_not_a_panic() {
+    // `spyglass … | head`: the reader goes away before we write.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_spyglass"))
+        .arg("skill")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(out.status.code().is_some(), "killed by a signal: {:?}", out.status);
+}

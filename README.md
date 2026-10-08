@@ -39,7 +39,7 @@ The built-in tools work well on ordinary pages and GitHub. spyglass matters wher
 
 `web read`, `rss` and `github` need nothing extra. `spyglass doctor` shows what is missing.
 
-To build from source you also need Rust 1.85+ (edition 2024), a C compiler and CMake (for the `aws-lc` crypto library).
+To build from source you also need Rust 1.87+, a C compiler and CMake (for the `aws-lc` crypto library).
 
 ## Install
 

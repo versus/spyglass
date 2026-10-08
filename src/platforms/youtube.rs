@@ -27,7 +27,13 @@ pub fn video_url(input: &str) -> Result<String> {
 async fn metadata(url: &str) -> Result<Value> {
     let mut args = BASE_ARGS.to_vec();
     args.extend(["--dump-single-json", "--", url]);
-    Ok(serde_json::from_str(&tools::run("yt-dlp", &args, TIMEOUT, MAX_JSON).await?)?)
+    Ok(serde_json::from_str(&ytdlp(&args).await?)?)
+}
+
+/// yt-dlp needs a JavaScript runtime (deno) for YouTube: make sure it can find it.
+async fn ytdlp(args: &[&str]) -> Result<String> {
+    let deno: Vec<std::path::PathBuf> = tools::find("deno").and_then(|p| p.parent().map(|d| d.to_path_buf())).into_iter().collect();
+    tools::run_with("yt-dlp", args, TIMEOUT, MAX_JSON, &tools::Extra { path_dirs: &deno, ..Default::default() }).await
 }
 
 pub async fn video(input: &str) -> Result<Doc> {
@@ -61,7 +67,7 @@ pub async fn search(query: &str, limit: usize) -> Result<Doc> {
     let q = validate::query(query)?;
     let target = format!("ytsearch{limit}:{q}");
     let args = ["--ignore-config", "--no-cache-dir", "--no-warnings", "--flat-playlist", "--dump-single-json", "--", target.as_str()];
-    let v: Value = serde_json::from_str(&tools::run("yt-dlp", &args, TIMEOUT, MAX_JSON).await?)?;
+    let v: Value = serde_json::from_str(&ytdlp(&args).await?)?;
     Ok(Doc::new("youtube", None, render_search(&v), v["entries"].clone()))
 }
 
@@ -148,10 +154,15 @@ pub fn parse_vtt(raw: &str) -> Vec<(u64, String)> {
 }
 
 fn vtt_ms(ts: &str) -> Option<u64> {
-    let (hms, ms) = ts.split_once('.')?;
+    // "01:02:03.5", "00:03,250" (SRT style): fraction padded to milliseconds.
+    let (hms, frac) = ts.split_once(['.', ','])?;
     let parts: Vec<u64> = hms.split(':').map(|p| p.parse().ok()).collect::<Option<_>>()?;
     let secs = parts.iter().fold(0, |acc, p| acc * 60 + p);
-    Some(secs * 1000 + ms.get(..3)?.parse::<u64>().ok()?)
+    let digits: String = frac.chars().take(3).collect();
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(secs * 1000 + format!("{digits:0<3}").parse::<u64>().ok()?)
 }
 
 pub fn paragraphs(lines: &[(u64, String)]) -> String {
@@ -184,8 +195,11 @@ fn duration(secs: f64) -> String {
 }
 
 pub fn render_video(v: &Value) -> String {
-    let date =
-        v["upload_date"].as_str().filter(|d| d.len() == 8).map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..])).unwrap_or_default();
+    let date = v["upload_date"]
+        .as_str()
+        .filter(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()))
+        .map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..]))
+        .unwrap_or_default();
     let mut md = format!(
         "# {}\n\n{} · {} · {} · {} views · {} likes\n",
         v["title"].as_str().unwrap_or(""),
@@ -281,6 +295,20 @@ mod tests {
     fn parses_vtt_dropping_tags_and_rolling_duplicates() {
         let raw = "WEBVTT\nKind: captions\nLanguage: en\n\n00:00:01.000 --> 00:00:03.000 align:start\nhello <c>world</c>\n\n00:00:03.000 --> 00:00:05.000\nhello world\nnext line\n\n01:02:03.500 --> 01:02:04.000\n&gt; quoted &amp; done\n";
         assert_eq!(parse_vtt(raw), vec![(1000, "hello world".into()), (3000, "next line".into()), (3_723_500, "> quoted & done".into())]);
+    }
+
+    #[test]
+    fn vtt_timestamps_with_short_or_comma_milliseconds() {
+        let raw = "WEBVTT\n\n00:00:01.5 --> 00:00:02.000\nshort ms\n\n00:00:03,250 --> 00:00:04,000\ncomma ms\n";
+        assert_eq!(parse_vtt(raw), vec![(1500, "short ms".into()), (3250, "comma ms".into())]);
+    }
+
+    #[test]
+    fn odd_upload_dates_do_not_panic() {
+        let v = json!({"title": "t", "upload_date": "2005-4-2", "duration": 1});
+        assert!(render_video(&v).starts_with("# t"));
+        let v = json!({"title": "t", "upload_date": "2005-ä4", "duration": 1});
+        assert!(render_video(&v).starts_with("# t"));
     }
 
     #[test]

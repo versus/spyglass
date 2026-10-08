@@ -24,14 +24,34 @@ fn is_executable(p: &Path) -> bool {
 }
 
 /// Run `name args…` and return stdout. Non-zero exit is an error carrying a stderr excerpt.
+/// Additions to the otherwise empty child environment.
+#[derive(Default)]
+pub struct Extra<'a> {
+    /// Directories prepended to PATH (e.g. where `deno` lives, for yt-dlp).
+    pub path_dirs: &'a [PathBuf],
+    /// Variables copied from our environment (e.g. D-Bus/display for notify-send).
+    pub pass_env: &'a [&'a str],
+}
+
 pub async fn run(name: &str, args: &[&str], timeout: Duration, max_bytes: usize) -> Result<String> {
+    run_with(name, args, timeout, max_bytes, &Extra::default()).await
+}
+
+pub async fn run_with(name: &str, args: &[&str], timeout: Duration, max_bytes: usize, extra: &Extra<'_>) -> Result<String> {
     let bin = find(name).ok_or_else(|| anyhow::anyhow!("`{name}` is not installed (not found in PATH)"))?;
     let home = ScratchDir::new()?;
-    let bin_dir = bin.parent().map(|d| d.display().to_string()).unwrap_or_default();
-    let mut child = tokio::process::Command::new(&bin)
+    let dirs: Vec<String> =
+        extra.path_dirs.iter().chain(bin.parent().map(Path::to_path_buf).as_ref()).map(|d| d.display().to_string()).collect();
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.env_clear();
+    for var in extra.pass_env.iter().filter(|v| !v.starts_with("SPYGLASS_")) {
+        if let Some(value) = std::env::var_os(var) {
+            cmd.env(var, value);
+        }
+    }
+    let mut child = cmd
         .args(args)
-        .env_clear()
-        .env("PATH", format!("{bin_dir}:/usr/bin:/bin"))
+        .env("PATH", format!("{}:/usr/bin:/bin", dirs.join(":")))
         .env("HOME", &home.0)
         .env("LANG", "C.UTF-8")
         .stdin(Stdio::null())
@@ -119,6 +139,21 @@ mod tests {
         let out = run("printf", &args, T, 4096).await.unwrap();
         let parts: Vec<&str> = out.split("\n--\n").filter(|p| !p.is_empty()).collect();
         assert_eq!(parts, hostile);
+    }
+
+    #[tokio::test]
+    async fn extra_path_dirs_and_passed_variables_reach_the_child() {
+        let dir = std::env::temp_dir().join("spyglass-extra-path");
+        let extra = Extra { path_dirs: std::slice::from_ref(&dir), pass_env: &["USER", "SPYGLASS_GITHUB_TOKEN"] };
+        let out = run_with("env", &[], T, 4096, &extra).await.unwrap();
+        let path = out.lines().find(|l| l.starts_with("PATH=")).unwrap();
+        assert!(path.starts_with(&format!("PATH={}:", dir.display())), "{path}");
+        if let Ok(user) = std::env::var("USER") {
+            assert!(out.contains(&format!("USER={user}")));
+        }
+        assert!(!out.contains("SPYGLASS_"), "secrets can never be passed through");
+        let plain = run("env", &[], T, 4096).await.unwrap();
+        assert!(!plain.lines().any(|l| l.starts_with("USER=")));
     }
 
     #[tokio::test]

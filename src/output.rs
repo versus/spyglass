@@ -37,14 +37,13 @@ pub fn render(doc: &Doc, opts: Render) -> String {
     if opts.json {
         let mut data = doc.data.clone();
         sanitize_json(&mut data);
-        let wrapped = serde_json::json!({
+        let mut wrapped = serde_json::json!({
             "trust": "untrusted",
             "source": doc.source,
             "url": doc.url.as_deref().map(sanitize),
             "data": data,
         });
-        let text = serde_json::to_string_pretty(&wrapped).unwrap_or_default();
-        return truncate(&text, opts.max_chars);
+        return fit_json(&mut wrapped, opts.max_chars);
     }
     let body = truncate(&sanitize(&doc.markdown), opts.max_chars);
     envelope(doc.source, doc.url.as_deref(), &body)
@@ -185,6 +184,43 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
     format!("{cut}\n…[truncated: {} of {total} chars omitted; raise --max-chars to see more]", total - max_chars)
 }
 
+/// Serialize within `max` chars while staying valid JSON: shorten long strings,
+/// then drop trailing list items, and mark the result `"truncated": true`.
+fn fit_json(wrapped: &mut Value, max: usize) -> String {
+    let text = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
+    let fits = |v: &Value| text(v).chars().count() <= max;
+    if fits(wrapped) {
+        return text(wrapped);
+    }
+    wrapped["truncated"] = Value::Bool(true);
+    let mut limit = 1000;
+    while !fits(wrapped) && limit >= 50 {
+        shorten_strings(&mut wrapped["data"], limit);
+        limit /= 2;
+    }
+    while !fits(wrapped) {
+        match wrapped["data"].as_array_mut() {
+            Some(items) if items.len() > 1 => {
+                items.pop();
+            }
+            _ => {
+                wrapped["data"] = Value::Null;
+                break;
+            }
+        }
+    }
+    text(wrapped)
+}
+
+fn shorten_strings(v: &mut Value, limit: usize) {
+    match v {
+        Value::String(s) if s.chars().count() > limit => *s = format!("{}…", s.chars().take(limit).collect::<String>()),
+        Value::Array(items) => items.iter_mut().for_each(|i| shorten_strings(i, limit)),
+        Value::Object(map) => map.values_mut().for_each(|i| shorten_strings(i, limit)),
+        _ => {}
+    }
+}
+
 fn sanitize_json(v: &mut Value) {
     match v {
         Value::String(s) => *s = sanitize(s),
@@ -293,6 +329,20 @@ mod tests {
         assert_eq!(out.matches("</untrusted>").count(), 1);
         assert!(out.ends_with("</untrusted>"));
         assert!(out.contains("url=\"https://e.com/&quot;x\""));
+    }
+
+    #[test]
+    fn json_mode_stays_valid_when_truncated() {
+        let big: Vec<Value> = (0..200).map(|i| serde_json::json!({"title": format!("item {i}"), "text": "x".repeat(500)})).collect();
+        let doc = Doc::new("x", Some("https://e.com".into()), String::new(), Value::Array(big));
+        let out = render(&doc, Render { max_chars: 3000, json: true });
+        assert!(out.chars().count() <= 3000, "{} chars", out.chars().count());
+        let v: Value = serde_json::from_str(&out).expect("must stay valid JSON");
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["trust"], "untrusted");
+        assert!(!v["data"].as_array().unwrap().is_empty());
+        let small = render(&Doc::new("x", None, String::new(), serde_json::json!({"a": 1})), Render { max_chars: 3000, json: true });
+        assert!(serde_json::from_str::<Value>(&small).unwrap().get("truncated").is_none());
     }
 
     #[test]

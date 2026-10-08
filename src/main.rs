@@ -410,6 +410,11 @@ fn secrets_cmd(cmd: &SecretsCmd) -> Result<String> {
     }
 }
 
+/// Write the final output; a closed pipe (`spyglass … | head`) is not an error.
+fn emit(out: &mut impl std::io::Write, text: &str) {
+    let _ = writeln!(out, "{text}");
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -427,10 +432,10 @@ async fn main() -> ExitCode {
         audit::record(&path, &audit::Entry { ts, command: cli.cmd.label(), host, ok, output_chars: text.len() });
     }
     if ok {
-        println!("{text}");
+        emit(&mut std::io::stdout(), &text);
         ExitCode::SUCCESS
     } else {
-        eprintln!("{text}");
+        emit(&mut std::io::stderr(), &text);
         ExitCode::FAILURE
     }
 }
