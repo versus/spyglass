@@ -14,8 +14,16 @@ use crate::tools;
 
 const BROWSERS: &[&str] = &["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"];
 
+/// macOS apps are not on PATH.
+const APP_PATHS: &[&str] =
+    &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium"];
+
 pub fn find_chrome() -> Option<std::path::PathBuf> {
-    BROWSERS.iter().find_map(|b| tools::find(b))
+    BROWSERS.iter().find_map(|b| tools::find(b)).or_else(|| first_existing(APP_PATHS))
+}
+
+fn first_existing(paths: &[&str]) -> Option<std::path::PathBuf> {
+    paths.iter().map(std::path::PathBuf::from).find(|p| p.is_file())
 }
 
 /// Flags for a quiet, private, extension-free profile. Chrome's own sandbox stays on.
@@ -97,6 +105,20 @@ mod tests {
         assert!(!chrome_args(Path::new("/tmp/p"), false).contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--no-startup-window".to_string()), "no empty startup window");
         assert!(!args.iter().any(|a| a == "about:blank"));
+    }
+
+    #[test]
+    fn falls_back_to_app_bundle_paths() {
+        let dir = std::env::temp_dir().join(format!("spyglass-chrome-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("Google Chrome");
+        std::fs::write(&app, "").unwrap();
+        let missing = dir.join("missing");
+        let paths = [missing.to_str().unwrap(), app.to_str().unwrap()];
+        assert_eq!(first_existing(&paths), Some(app.clone()));
+        assert_eq!(first_existing(&paths[..1]), None);
+        assert!(APP_PATHS.iter().any(|p| p.contains("Google Chrome.app")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Needs a real Chrome: `cargo test -- --ignored launches_real_chrome`.

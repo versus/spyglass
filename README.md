@@ -14,6 +14,18 @@ Every result is wrapped in `<untrusted source="…" url="…">…</untrusted>` a
 
 ## Install
 
+Prebuilt binaries for Linux (x86_64, arm64) and macOS (Apple Silicon, Intel) are on the
+[releases page](https://github.com/versus/spyglass/releases). Each archive has a SHA-256 file
+and a signed build-provenance attestation:
+
+```sh
+gh attestation verify spyglass-v0.1.0-aarch64-apple-darwin.tar.gz --repo versus/spyglass
+tar xzf spyglass-*.tar.gz && install -m 755 spyglass-*/spyglass ~/.local/bin/
+# macOS, if downloaded with a browser: xattr -d com.apple.quarantine ~/.local/bin/spyglass
+```
+
+From source:
+
 ```sh
 cargo build --release --locked && install -m 755 target/release/spyglass ~/.local/bin/
 spyglass doctor
