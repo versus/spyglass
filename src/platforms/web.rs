@@ -56,12 +56,6 @@ fn whole_page(html: &str, url: &str) -> Doc {
     let page = dom_query::Document::from(html);
     let title = page.select("title").text().trim().to_string();
     page.select("script, style, noscript, template, svg, iframe, form, header, footer, nav, aside, [role=navigation], [role=banner], [role=contentinfo], [aria-hidden=true]").remove();
-    // Icon-only links (vote arrows, share buttons) would become empty `[](…)` noise.
-    for a in page.select("a").iter() {
-        if a.text().trim().is_empty() {
-            a.remove();
-        }
-    }
     if let Ok(base) = url::Url::parse(url) {
         for a in page.select("a[href]").iter() {
             if let Some(abs) = a.attr("href").and_then(|h| base.join(&h).ok()) {
@@ -91,7 +85,25 @@ pub fn html_to_markdown(html: &str) -> String {
     let converter = htmd::HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style", "noscript", "iframe", "svg", "img", "video", "audio", "form", "button"])
         .build();
-    converter.convert(html).unwrap_or_default().trim().to_string()
+    drop_empty_links(&converter.convert(html).unwrap_or_default()).trim().to_string()
+}
+
+/// Icon-only links (vote arrows, share buttons) become `[](url)`: noise for the agent.
+fn drop_empty_links(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(i) = rest.find("[](") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find(')') {
+            Some(end) => rest = &rest[i + end + 1..],
+            None => {
+                rest = &rest[i..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -127,7 +139,8 @@ its community, the compiler, the standard library, and the ecosystem of crates t
         assert!(!doc.markdown.contains("x()"), "no scripts");
         assert!(!doc.markdown.contains("All rights reserved"), "no footer");
         assert!(!doc.markdown.contains("Cart"), "no header chrome");
-        let icons = extract(&LISTING.replace("<main>", r#"<main><a href="/vote"><img src="up.gif"></a>"#), "https://shop.example.com/").unwrap();
+        let icons =
+            extract(&LISTING.replace("<main>", r#"<main><a href="/vote"><img src="up.gif"></a>"#), "https://shop.example.com/").unwrap();
         assert!(!icons.markdown.contains("[]("), "{}", icons.markdown);
     }
 
