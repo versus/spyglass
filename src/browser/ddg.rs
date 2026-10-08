@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::scenario::{Ctx, Found, NAV_TIMEOUT, Site, arg_str, arg_usize, ask_user, wait_until};
+use super::scenario::{Ctx, Found, NAV_TIMEOUT, Site, arg_str, arg_usize, ask_user, require_visible, wait_until};
 use super::tab::Allow;
 use crate::platforms::search;
 
@@ -22,6 +22,7 @@ pub async fn job(ctx: &Ctx<'_>, _verb: &str, args: &Value) -> Result<Found> {
         Ok(r) => r,
         Err(_) => {
             // A captcha: hand the tab to the user and continue once it is solved.
+            require_visible(ctx.headless, "A DuckDuckGo captcha")?;
             tab.focus().await?;
             ask_user(notify, "DuckDuckGo shows a captcha. Please solve it in the agent browser window (waiting up to 120s).").await;
             wait_until(Duration::from_secs(120), || async { page().await.ok() })

@@ -24,6 +24,8 @@ pub struct Ctx<'a> {
     pub cdp: &'a Cdp,
     pub tab: &'a Tab,
     pub notify: &'a mpsc::Sender<Reply>,
+    /// No window: nobody can solve a captcha or log in.
+    pub headless: bool,
 }
 
 /// What every scenario returns.
@@ -64,6 +66,14 @@ pub fn when_ready(ready: &str, blocked_marker: &str, extract: &str) -> String {
 }
 
 /// Tell the user (desktop notification + the agent's stderr) that the browser needs them.
+/// A hand-off to the user needs a visible window; in headless mode fail fast instead of waiting.
+pub fn require_visible(headless: bool, need: &str) -> Result<()> {
+    if headless {
+        bail!("{need} needs a person, but the agent browser runs headless: run `spyglass browser stop`, then `spyglass browser start`");
+    }
+    Ok(())
+}
+
 pub async fn ask_user(notify: &mpsc::Sender<Reply>, message: &str) {
     // notify-send needs the session bus and display; nothing else is passed.
     let session = crate::tools::Extra {
@@ -100,10 +110,11 @@ pub async fn ensure_session(
     login_url: &str,
     wait: Duration,
 ) -> Result<()> {
-    let Ctx { cdp, tab, notify } = *ctx;
+    let Ctx { cdp, tab, notify, headless } = *ctx;
     if tab.cookie(cookie_url, cookie).await?.is_some() {
         return Ok(());
     }
+    require_visible(headless, &format!("A login to {platform}"))?;
     let login = Tab::open(cdp, None, None).await?.keep_open();
     let _ = login.goto(login_url, NAV_TIMEOUT).await;
     let _ = login.focus().await;
@@ -137,4 +148,16 @@ pub async fn capture_graphql(tab: &Tab, url: &str, op: &str, wait: Duration) -> 
     let id = response.params["requestId"].as_str().unwrap_or("").to_string();
     tab.wait_for(&mut events, wait, |e| e.method == "Network.loadingFinished" && e.params["requestId"] == id.as_str()).await?;
     tab.response_body(&id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoff_needs_a_visible_browser() {
+        assert!(require_visible(false, "a captcha").is_ok());
+        let err = require_visible(true, "a captcha").unwrap_err().to_string();
+        assert!(err.contains("a captcha") && err.contains("spyglass browser start"), "{err}");
+    }
 }

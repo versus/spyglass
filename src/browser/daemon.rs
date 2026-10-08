@@ -224,7 +224,7 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
                 false => None,
             };
             let tab = Tab::open(&state.cdp, scratch.as_ref().map(|s| s.id.as_str()), Some(site.allow)).await?;
-            let ctx = Ctx { cdp: &state.cdp, tab: &tab, notify };
+            let ctx = Ctx { cdp: &state.cdp, tab: &tab, notify, headless: state.headless };
             log(&format!("job {platform} {verb}"));
             let found = match platform.as_str() {
                 "reddit" => reddit::job(&ctx, &verb, &args).await,
