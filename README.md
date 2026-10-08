@@ -4,7 +4,8 @@ Read-only internet access for AI agents, built security-first. One Rust binary, 
 plus a ~550-token skill. A clean-room replacement for Agent-Reach.
 
 ```
-spyglass web read <url> [--render] [--links]spyglass github repo|readme|file|search-repos|search-code|issues|issue|prs|pr|releases
+spyglass web read <url> [--render] [--links]
+spyglass github repo|readme|file|search-repos|search-code|issues|issue|prs|pr|releases
 spyglass search "<query>"               spyglass youtube video|transcript|search
 spyglass rss <url>                      spyglass reddit search|sub|post        (agent browser, no login)
 spyglass doctor                         spyglass x search|user|post            (agent browser, log in once)
