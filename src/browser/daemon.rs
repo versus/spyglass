@@ -91,6 +91,17 @@ impl WorkTabs {
         tab.set_allow(allow);
         Ok(tab)
     }
+
+    /// Arbitrary pages leave nothing behind: close the window and dispose the
+    /// cookie-less context (its cookies and storage) after every job.
+    async fn discard_scratch(&mut self, cdp: &Cdp) {
+        if let Some(tab) = self.scratch.take() {
+            tab.close().await;
+        }
+        if let Some(ctx) = self.scratch_ctx.take() {
+            let _ = cdp.call("Target.disposeBrowserContext", json!({ "browserContextId": ctx }), None).await;
+        }
+    }
 }
 
 pub async fn serve(headless: bool) -> Result<()> {
@@ -228,6 +239,9 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
             };
             if let Err(e) = &found {
                 log(&format!("job {platform} {verb} failed: {e:#}"));
+            }
+            if site.scratch {
+                work.discard_scratch(&state.cdp).await;
             }
             found.map(Reply::from)
         }
