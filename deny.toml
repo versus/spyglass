@@ -2,6 +2,14 @@
 [advisories]
 version = 2
 yanked = "deny"
+# Accepted risks. Each entry says why and when to revisit.
+ignore = [
+    # ttf-parser is unmaintained (no known vulnerability). It comes in via pdf-extract -> lopdf
+    # (a required dependency) to read fonts embedded in PDFs. It is safe Rust, and spyglass
+    # parses untrusted PDFs on a separate thread with a 30 s limit. Revisit when lopdf moves to
+    # skrifa, or drop PDF support if a vulnerability is reported.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, no known vulnerability; isolated PDF parsing" },
+]
 
 [licenses]
 version = 2
