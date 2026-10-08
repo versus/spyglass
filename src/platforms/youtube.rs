@@ -209,6 +209,12 @@ pub fn render_video(v: &Value) -> String {
         v["view_count"],
         v["like_count"],
     );
+    match v["live_status"].as_str() {
+        Some("was_live") => md.push_str("Format: live stream recording\n"),
+        Some("is_live") => md.push_str("Format: live now\n"),
+        Some("is_upcoming") => md.push_str("Format: upcoming live stream\n"),
+        _ => {}
+    }
     if let Some(chapters) = v["chapters"].as_array().filter(|c| !c.is_empty()) {
         md.push_str("\n## Chapters\n");
         for c in chapters {
@@ -236,7 +242,19 @@ pub fn render_search(v: &Value) -> String {
 
 /// Keep only useful metadata for --json (the raw dump is ~100 KB of formats).
 fn slim(v: &Value) -> Value {
-    let keys = ["id", "title", "channel", "upload_date", "duration", "view_count", "like_count", "description", "chapters", "webpage_url"];
+    let keys = [
+        "id",
+        "title",
+        "channel",
+        "upload_date",
+        "duration",
+        "view_count",
+        "like_count",
+        "live_status",
+        "description",
+        "chapters",
+        "webpage_url",
+    ];
     Value::Object(keys.iter().filter_map(|k| v.get(*k).map(|x| (k.to_string(), x.clone()))).collect())
 }
 
@@ -315,6 +333,15 @@ mod tests {
     fn groups_paragraphs_with_timestamps() {
         let lines = vec![(0, "a".to_string()), (10_000, "b".into()), (31_000, "c".into()), (3_700_000, "d".into())];
         assert_eq!(paragraphs(&lines), "[00:00] a b\n\n[00:31] c\n\n[61:40] d");
+    }
+
+    #[test]
+    fn marks_live_stream_recordings() {
+        let v = json!({"title":"Dune #12","channel":"Play At Home","upload_date":"20261008","duration":14400,"live_status":"was_live"});
+        assert!(render_video(&v).contains("live stream recording"), "{}", render_video(&v));
+        let v = json!({"title":"City 20","channel":"Play At Home","upload_date":"20261007","duration":3600,"live_status":"not_live"});
+        assert!(!render_video(&v).contains("live"));
+        assert_eq!(slim(&json!({"live_status":"was_live"}))["live_status"], "was_live");
     }
 
     #[test]
