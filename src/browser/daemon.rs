@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, mpsc};
 use super::cdp::Cdp;
 use super::proto::{Reply, Request};
 use super::scenario::{Ctx, Found, NAV_TIMEOUT};
-use super::tab::{Allow, Tab};
+use super::tab::Tab;
 use super::{chrome, ddg, reddit, render, x};
 
 const MAX_REQUEST: u64 = 64 * 1024;
@@ -57,49 +57,38 @@ struct State {
     cdp: Cdp,
     headless: bool,
     version: String,
-    /// The agent's tabs. Locked for the whole job: one scenario at a time, gentle on platforms.
-    work: Mutex<WorkTabs>,
+    /// Held for the whole job: one scenario at a time, gentle on platforms.
+    turn: Mutex<()>,
     stop: mpsc::Sender<()>,
 }
 
-/// Scenarios reuse one visible tab instead of opening a new one per job.
-#[derive(Default)]
-struct WorkTabs {
-    /// Logged-in profile: platform scenarios (fixed domain allowlists).
-    main: Option<Tab>,
-    /// Cookie-less context (its own window) for arbitrary pages.
-    scratch: Option<Tab>,
-    scratch_ctx: Option<String>,
+/// A cookie-less browser context; disposed after the job (or when dropped on cancel).
+struct Scratch {
+    cdp: Cdp,
+    id: String,
+    disposed: bool,
 }
 
-impl WorkTabs {
-    async fn tab(&mut self, cdp: &Cdp, scratch: bool, allow: Allow) -> Result<&Tab> {
-        if scratch && self.scratch_ctx.is_none() {
-            let r = cdp.call("Target.createBrowserContext", json!({ "disposeOnDetach": false }), None).await?;
-            self.scratch_ctx = r["browserContextId"].as_str().map(str::to_string);
-        }
-        let ctx = if scratch { self.scratch_ctx.clone() } else { None };
-        let slot = if scratch { &mut self.scratch } else { &mut self.main };
-        let alive = match slot {
-            Some(t) => t.alive().await,
-            None => false,
-        };
-        if !alive {
-            *slot = Some(Tab::open(cdp, ctx.as_deref(), Some(allow.clone())).await?.keep_open());
-        }
-        let tab = slot.as_ref().context("no agent tab")?;
-        tab.set_allow(allow);
-        Ok(tab)
+impl Scratch {
+    async fn create(cdp: &Cdp) -> Result<Self> {
+        let r = cdp.call("Target.createBrowserContext", json!({ "disposeOnDetach": false }), None).await?;
+        let id = r["browserContextId"].as_str().context("no browserContextId")?.to_string();
+        Ok(Self { cdp: cdp.clone(), id, disposed: false })
     }
 
-    /// Arbitrary pages leave nothing behind: close the window and dispose the
-    /// cookie-less context (its cookies and storage) after every job.
-    async fn discard_scratch(&mut self, cdp: &Cdp) {
-        if let Some(tab) = self.scratch.take() {
-            tab.close().await;
-        }
-        if let Some(ctx) = self.scratch_ctx.take() {
-            let _ = cdp.call("Target.disposeBrowserContext", json!({ "browserContextId": ctx }), None).await;
+    async fn dispose(mut self) {
+        self.disposed = true;
+        let _ = self.cdp.call("Target.disposeBrowserContext", json!({ "browserContextId": self.id }), None).await;
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if !self.disposed {
+            let (cdp, id) = (self.cdp.clone(), self.id.clone());
+            tokio::spawn(async move {
+                let _ = cdp.call("Target.disposeBrowserContext", json!({ "browserContextId": id }), None).await;
+            });
         }
     }
 }
@@ -129,7 +118,7 @@ pub async fn serve(headless: bool) -> Result<()> {
     });
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let state = Arc::new(State { cdp: cdp.clone(), headless, version, work: Mutex::default(), stop });
+    let state = Arc::new(State { cdp: cdp.clone(), headless, version, turn: Mutex::new(()), stop });
     loop {
         tokio::select! {
             conn = listener.accept() => {
@@ -214,11 +203,11 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
             Ok(Found { url: Some(url.into()), markdown, data: Value::Null }.into())
         }
         Request::Job { platform, verb, args } => {
-            let mut work = match state.work.try_lock() {
-                Ok(work) => work,
+            let _turn = match state.turn.try_lock() {
+                Ok(turn) => turn,
                 Err(_) => {
                     let _ = notify.send(Reply::Waiting { message: "another browser job is running; queued".into() }).await;
-                    state.work.lock().await
+                    state.turn.lock().await
                 }
             };
             let site = match platform.as_str() {
@@ -228,8 +217,14 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
                 "web" => render::SITE,
                 _ => bail!("unknown platform {platform:?}"),
             };
-            let tab = work.tab(&state.cdp, site.scratch, site.allow).await?;
-            let ctx = Ctx { cdp: &state.cdp, tab, notify };
+            // Every job gets its own tab and closes it: nothing is left open afterwards.
+            // Arbitrary pages run in a fresh cookie-less context that is disposed afterwards.
+            let scratch = match site.scratch {
+                true => Some(Scratch::create(&state.cdp).await?),
+                false => None,
+            };
+            let tab = Tab::open(&state.cdp, scratch.as_ref().map(|s| s.id.as_str()), Some(site.allow)).await?;
+            let ctx = Ctx { cdp: &state.cdp, tab: &tab, notify };
             log(&format!("job {platform} {verb}"));
             let found = match platform.as_str() {
                 "reddit" => reddit::job(&ctx, &verb, &args).await,
@@ -240,8 +235,9 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
             if let Err(e) = &found {
                 log(&format!("job {platform} {verb} failed: {e:#}"));
             }
-            if site.scratch {
-                work.discard_scratch(&state.cdp).await;
+            tab.close().await;
+            if let Some(scratch) = scratch {
+                scratch.dispose().await;
             }
             found.map(Reply::from)
         }

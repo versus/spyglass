@@ -70,8 +70,6 @@ pub struct Tab {
     pub target_id: String,
     pub session: String,
     guard: Option<JoinHandle<()>>,
-    /// Current network policy of a guarded tab; scenarios switch it when reusing the tab.
-    allow: Option<Arc<std::sync::Mutex<Allow>>>,
     /// Scenario tabs close themselves even when the job is cancelled; login tabs stay for the user.
     close_on_drop: bool,
 }
@@ -105,19 +103,18 @@ impl Tab {
             .context("no sessionId")?
             .to_string();
         let s = Some(session.as_str());
-        let allow = allow.map(|a| Arc::new(std::sync::Mutex::new(a)));
-        let guard = match &allow {
-            Some(allow) => Some(Self::install_guard(cdp, &session, allow.clone()).await?),
+        let guard = match allow {
+            Some(allow) => Some(Self::install_guard(cdp, &session, allow).await?),
             None => None,
         };
         for domain in ["Page.enable", "Network.enable", "Runtime.enable"] {
             cdp.call(domain, json!({}), s).await?;
         }
         cdp.call("Page.setLifecycleEventsEnabled", json!({ "enabled": true }), s).await?;
-        Ok(Tab { cdp: cdp.clone(), target_id, session, guard, allow, close_on_drop: true })
+        Ok(Tab { cdp: cdp.clone(), target_id, session, guard, close_on_drop: true })
     }
 
-    async fn install_guard(cdp: &Cdp, session: &str, allow: Arc<std::sync::Mutex<Allow>>) -> Result<JoinHandle<()>> {
+    async fn install_guard(cdp: &Cdp, session: &str, allow: Allow) -> Result<JoinHandle<()>> {
         let mut events = cdp.subscribe();
         cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] }), Some(session)).await?;
         // Per-tab DNS cache: host -> resolved addresses (None = did not resolve).
@@ -137,7 +134,7 @@ impl Tab {
                     let id = ev.params["requestId"].clone();
                     let url = ev.params["request"]["url"].as_str().unwrap_or("").to_string();
                     let kind = ev.params["resourceType"].as_str().unwrap_or("").to_string();
-                    let policy = allow.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let policy = allow.clone();
                     let (cdp, session, dns) = (cdp.clone(), session.clone(), dns.clone());
                     // Decide off the event loop: a DNS lookup must not stall other requests.
                     tokio::spawn(async move {
@@ -152,18 +149,6 @@ impl Tab {
                 }
             }
         }))
-    }
-
-    /// Switch the network policy (when a scenario reuses this tab).
-    pub fn set_allow(&self, new: Allow) {
-        if let Some(a) = &self.allow {
-            *a.lock().unwrap_or_else(|e| e.into_inner()) = new;
-        }
-    }
-
-    /// Does the tab still exist (the user may have closed it)?
-    pub async fn alive(&self) -> bool {
-        self.eval("1").await.is_ok()
     }
 
     pub fn events(&self) -> broadcast::Receiver<Event> {
