@@ -64,12 +64,7 @@ pub async fn start(headless: bool) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_file)?
     };
-    let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    cmd.args(["browser", "daemon"]);
-    if headless {
-        cmd.arg("--headless");
-    }
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).process_group(0).spawn().context("starting the agent browser")?;
+    daemon_command(&std::env::current_exe()?, headless).stderr(log).spawn().context("starting the agent browser")?;
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(250)).await;
         if is_running().await {
@@ -77,6 +72,18 @@ pub async fn start(headless: bool) -> Result<()> {
         }
     }
     bail!("the agent browser did not start; see {}", log_file.display())
+}
+
+/// The daemon runs in its own process group (survives the terminal) and without API keys.
+fn daemon_command(exe: &std::path::Path, headless: bool) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["browser", "daemon"]);
+    if headless {
+        cmd.arg("--headless");
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).process_group(0);
+    crate::secrets::scrub_env(&mut cmd);
+    cmd
 }
 
 /// Run a job, starting the (visible) agent browser first if needed.
@@ -90,5 +97,15 @@ pub async fn doc(source: &'static str, verb: &str, args: serde_json::Value) -> R
     match job(source, verb, args).await? {
         Reply::Done { url, markdown, data } => Ok(crate::output::Doc::new(source, url, markdown, data)),
         Reply::Error { message } | Reply::Waiting { message } => bail!(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_never_inherits_api_keys() {
+        assert!(crate::secrets::scrubs_all(&daemon_command(std::path::Path::new("/bin/spyglass"), false)));
     }
 }

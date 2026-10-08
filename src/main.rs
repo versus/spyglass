@@ -420,7 +420,7 @@ async fn main() -> ExitCode {
             let host = doc.url.as_deref().and_then(|u| url::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string));
             (true, output::render(doc, Render { max_chars: cli.max_chars, json: cli.json }), host)
         }
-        Err(e) => (false, output::sanitize(&format!("error: {e:#}")), None),
+        Err(e) => (false, output::render_error(&format!("{e:#}")), None),
     };
     if let Some(path) = audit::default_path() {
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

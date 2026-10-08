@@ -83,15 +83,15 @@ Use a dedicated account: automation is against the platforms' terms and accounts
 
 | Threat | Defense |
 |---|---|
-| Prompt injection in fetched content | `<untrusted>` envelope; ANSI/bidi/zero-width/tag-character stripping; size caps |
+| Prompt injection in fetched content | `<untrusted>` envelope (errors too, since they can quote remote content); ANSI/bidi/zero-width/line-separator/tag-character stripping; size caps |
 | Agent tricked into acting (posting, DMs) | no write commands exist; browser scenarios are fixed scripts, the agent passes only queries/URLs |
-| SSRF to localhost / cloud metadata / LAN | URL validation + DNS resolver that rejects non-public IPs + re-check on every redirect; env proxies ignored |
+| SSRF to localhost / cloud metadata / LAN | HTTP: URL validation + DNS resolver that rejects non-public IPs and pins the connection + re-check on every redirect; env proxies ignored. Browser: every request is checked by name and by DNS before Chrome may send it (residual risk: DNS rebinding between our lookup and Chrome's) |
 | Shell / argument injection | no shell anywhere; argv only; `--` before user values; strict validators |
 | Hostile external tool config (`yt-dlp --exec`) | `--ignore-config`, cleared environment, throwaway `HOME`, timeout, output cap |
 | Malicious page attacking logged-in sessions | arbitrary URLs render in a separate cookie-less browser context |
 | Browser hijack by local processes | Chrome is driven over `--remote-debugging-pipe`; no TCP port; daemon socket is `0600` |
 | Network exfiltration from scenario tabs | per-scenario domain allowlist; media blocked |
-| Secret leaks | OS keyring; secrets only in request headers; tests assert they never reach output or the audit log |
+| Secret leaks | OS keyring; secrets only in request headers of API calls that never follow redirects; not inherited by the daemon or Chrome; tests assert they never reach output or the audit log |
 | Supply chain | `Cargo.lock`, `cargo-deny`, SHA-pinned CI actions, no remote instructions, no self-update |
 
 Audit log (no secrets, no bodies): `~/.local/state/spyglass/audit.jsonl` (macOS: `~/Library/Application Support/spyglass/audit.jsonl`).

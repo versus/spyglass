@@ -47,13 +47,19 @@ pub fn chrome_args(profile: &Path, headless: bool) -> Vec<String> {
     args
 }
 
+fn chrome_command(bin: &Path, profile: &Path, headless: bool) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(chrome_args(profile, headless)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    crate::secrets::scrub_env(&mut cmd);
+    cmd
+}
+
 pub fn launch(profile: &Path, headless: bool) -> Result<(Cdp, Child)> {
     let bin = find_chrome().context("Chrome/Chromium not found in PATH")?;
     crate::paths::ensure_private_dir(profile)?;
     let (to_chrome_r, mut to_chrome_w) = std::io::pipe()?;
     let (from_chrome_r, from_chrome_w) = std::io::pipe()?;
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(chrome_args(profile, headless)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut cmd = chrome_command(&bin, profile, headless);
     cmd.fd_mappings(vec![
         FdMapping { parent_fd: to_chrome_r.into(), child_fd: 3 },
         FdMapping { parent_fd: from_chrome_w.into(), child_fd: 4 },
@@ -105,6 +111,11 @@ mod tests {
         assert!(!chrome_args(Path::new("/tmp/p"), false).contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--no-startup-window".to_string()), "no empty startup window");
         assert!(!args.iter().any(|a| a == "about:blank"));
+    }
+
+    #[test]
+    fn chrome_never_inherits_api_keys() {
+        assert!(crate::secrets::scrubs_all(&chrome_command(Path::new("/bin/chrome"), Path::new("/tmp/p"), true)));
     }
 
     #[test]

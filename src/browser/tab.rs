@@ -1,6 +1,8 @@
 //! One browser tab driven by a fixed scenario: network allowlist, navigation,
 //! JSON response capture, evaluation of our own (never agent-supplied) scripts.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +34,35 @@ pub fn request_allowed(url: &str, resource_type: &str, allow: &Allow) -> bool {
         Allow::AnyPublic => crate::validate::public_url(url).is_ok() && url.starts_with("http"),
         Allow::Domains(domains) => url.starts_with("https://") && crate::validate::url_on(url, domains).is_ok(),
     }
+}
+
+/// Full decision: the static rules above, then the host must resolve to public
+/// addresses only (Chrome does its own DNS, so a name alone proves nothing).
+pub async fn request_permitted<R, F>(url: &str, resource_type: &str, allow: &Allow, resolve: R) -> bool
+where
+    R: Fn(String) -> F,
+    F: std::future::Future<Output = Option<Vec<std::net::IpAddr>>>,
+{
+    if !request_allowed(url, resource_type, allow) {
+        return false;
+    }
+    // data:/blob: have no host; literal IPs were already checked by the static rules.
+    let Some(url::Host::Domain(host)) = url::Url::parse(url).ok().and_then(|u| u.host().map(|h| h.to_owned())) else {
+        return true;
+    };
+    match resolve(host).await {
+        Some(addrs) if !addrs.is_empty() => addrs.iter().all(|ip| crate::validate::is_public_ip(*ip)),
+        _ => false,
+    }
+}
+
+async fn cached_resolve(cache: Arc<std::sync::Mutex<HashMap<String, Option<Vec<IpAddr>>>>>, host: String) -> Option<Vec<IpAddr>> {
+    if let Some(hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&host) {
+        return hit.clone();
+    }
+    let addrs = crate::net::resolve(&host).await;
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(host, addrs.clone());
+    addrs
 }
 
 pub struct Tab {
@@ -88,6 +119,8 @@ impl Tab {
     async fn install_guard(cdp: &Cdp, session: &str, allow: Arc<std::sync::Mutex<Allow>>) -> Result<JoinHandle<()>> {
         let mut events = cdp.subscribe();
         cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] }), Some(session)).await?;
+        // Per-tab DNS cache: host -> resolved addresses (None = did not resolve).
+        let dns: Arc<std::sync::Mutex<HashMap<String, Option<Vec<IpAddr>>>>> = Arc::default();
         Ok(tokio::spawn({
             let (cdp, session) = (cdp.clone(), session.to_string());
             async move {
@@ -101,16 +134,18 @@ impl Tab {
                         continue;
                     }
                     let id = ev.params["requestId"].clone();
-                    let url = ev.params["request"]["url"].as_str().unwrap_or("");
-                    let kind = ev.params["resourceType"].as_str().unwrap_or("");
-                    let ok = allow.lock().map(|a| request_allowed(url, kind, &a)).unwrap_or(false);
-                    let (method, params) = if ok {
-                        ("Fetch.continueRequest", json!({ "requestId": id }))
-                    } else {
-                        ("Fetch.failRequest", json!({ "requestId": id, "errorReason": "BlockedByClient" }))
-                    };
-                    let (cdp, session) = (cdp.clone(), session.clone());
+                    let url = ev.params["request"]["url"].as_str().unwrap_or("").to_string();
+                    let kind = ev.params["resourceType"].as_str().unwrap_or("").to_string();
+                    let policy = allow.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let (cdp, session, dns) = (cdp.clone(), session.clone(), dns.clone());
+                    // Decide off the event loop: a DNS lookup must not stall other requests.
                     tokio::spawn(async move {
+                        let ok = request_permitted(&url, &kind, &policy, |host| cached_resolve(dns.clone(), host)).await;
+                        let (method, params) = if ok {
+                            ("Fetch.continueRequest", json!({ "requestId": id }))
+                        } else {
+                            ("Fetch.failRequest", json!({ "requestId": id, "errorReason": "BlockedByClient" }))
+                        };
                         let _ = cdp.call(method, params, Some(&session)).await;
                     });
                 }
@@ -120,8 +155,8 @@ impl Tab {
 
     /// Switch the network policy (when a scenario reuses this tab).
     pub fn set_allow(&self, new: Allow) {
-        if let Some(Ok(mut current)) = self.allow.as_ref().map(|a| a.lock()) {
-            *current = new;
+        if let Some(a) = &self.allow {
+            *a.lock().unwrap_or_else(|e| e.into_inner()) = new;
         }
     }
 
@@ -242,6 +277,31 @@ mod tests {
         ] {
             assert!(!request_allowed(bad, "Document", &Allow::AnyPublic), "{bad}");
         }
+    }
+
+    fn ips(list: &[&str]) -> Option<Vec<std::net::IpAddr>> {
+        Some(list.iter().map(|s| s.parse().unwrap()).collect())
+    }
+
+    #[tokio::test]
+    async fn dns_must_resolve_to_public_addresses_only() {
+        let private = |_: String| async { ips(&["93.184.216.34", "127.0.0.1"]) };
+        let public = |_: String| async { ips(&["93.184.216.34"]) };
+        let unknown = |_: String| async { None };
+        let url = "https://rebind.attacker.example/latest/meta-data/";
+        assert!(!request_permitted(url, "Document", &Allow::AnyPublic, private).await, "DNS rebinding to loopback");
+        assert!(!request_permitted(url, "Document", &Allow::AnyPublic, unknown).await);
+        assert!(request_permitted(url, "Document", &Allow::AnyPublic, public).await);
+        assert!(!request_permitted("https://www.reddit.com/", "Document", &REDDIT, private).await);
+        assert!(request_permitted("https://www.reddit.com/", "Document", &REDDIT, public).await);
+    }
+
+    #[tokio::test]
+    async fn static_rules_apply_before_any_dns_lookup() {
+        let never = |_: String| async { panic!("must not resolve") };
+        assert!(!request_permitted("https://evil.com/", "Document", &REDDIT, never).await);
+        assert!(!request_permitted("https://www.reddit.com/a.png", "Image", &REDDIT, never).await);
+        assert!(request_permitted("data:text/css,a{}", "Stylesheet", &REDDIT, never).await);
     }
 
     #[test]

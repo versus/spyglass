@@ -62,9 +62,31 @@ pub fn remove(secret: Secret) -> Result<()> {
     Ok(())
 }
 
+/// Keep API keys out of long-lived child processes (daemon, Chrome).
+pub fn scrub_env(cmd: &mut std::process::Command) {
+    for secret in Secret::ALL {
+        cmd.env_remove(secret.env_var());
+    }
+}
+
+/// Test helper: does `cmd` remove every secret variable from its environment?
+#[cfg(test)]
+pub fn scrubs_all(cmd: &std::process::Command) -> bool {
+    let removed: Vec<_> = cmd.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_owned()).collect();
+    Secret::ALL.iter().all(|s| removed.iter().any(|k| k == s.env_var()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_env_removes_every_secret() {
+        let mut cmd = std::process::Command::new("true");
+        assert!(!scrubs_all(&cmd));
+        scrub_env(&mut cmd);
+        assert!(scrubs_all(&cmd));
+    }
 
     #[test]
     fn names_round_trip() {
