@@ -85,14 +85,7 @@ impl<'a> GitHub<'a> {
     /// Issues (`prs == false`) or pull requests (`prs == true`) of a repository.
     pub async fn list(&self, repo: &str, prs: bool, state: &str, limit: usize) -> Result<Doc> {
         let (o, r) = validate::github_repo(repo)?;
-        let state = match state {
-            "open" | "closed" | "all" => state,
-            _ => bail!("state must be open, closed or all"),
-        };
-        let kind = if prs { "pulls" } else { "issues" };
-        // The issues endpoint also returns PRs; over-fetch so filtering still yields `limit` items.
-        let per_page = if prs { limit } else { (limit * 4).min(100) };
-        let v = self.get(&format!("/repos/{o}/{r}/{kind}?state={state}&per_page={per_page}")).await?;
+        let v = self.get(&list_path(&o, &r, prs, state, limit)?).await?;
         Ok(doc(&o, &r, render_list(&v, prs, limit), v))
     }
 
@@ -127,6 +120,20 @@ fn s<'v>(v: &'v Value, key: &str) -> &'v str {
 
 fn date<'v>(v: &'v Value, key: &str) -> &'v str {
     s(v, key).get(..10).unwrap_or("")
+}
+
+/// API path listing a repository's issues or pull requests, newest first.
+/// Issues go through search: the `/issues` endpoint mixes in PRs, so busy repos return too few issues.
+pub fn list_path(owner: &str, repo: &str, prs: bool, state: &str, limit: usize) -> Result<String> {
+    if !matches!(state, "open" | "closed" | "all") {
+        bail!("state must be open, closed or all");
+    }
+    if prs {
+        return Ok(format!("/repos/{owner}/{repo}/pulls?state={state}&sort=created&direction=desc&per_page={limit}"));
+    }
+    let state_filter = if state == "all" { String::new() } else { format!(" state:{state}") };
+    let q = enc(&format!("repo:{owner}/{repo} is:issue{state_filter}"));
+    Ok(format!("/search/issues?q={q}&sort=created&order=desc&per_page={limit}"))
 }
 
 pub fn render_repo(v: &Value) -> String {
@@ -175,7 +182,9 @@ pub fn render_search_code(v: &Value) -> String {
 }
 
 pub fn render_list(v: &Value, prs: bool, limit: usize) -> String {
-    let items = v.as_array().into_iter().flatten().filter(|it| prs || it.get("pull_request").is_none()).take(limit);
+    // Plain arrays come from /pulls; search results wrap them in `items`.
+    let list = v.as_array().or_else(|| v["items"].as_array());
+    let items = list.into_iter().flatten().filter(|it| prs || it.get("pull_request").is_none()).take(limit);
     let mut md = String::new();
     for it in items {
         md.push_str(&format!(
@@ -226,6 +235,26 @@ pub fn render_releases(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issues_are_listed_via_search_and_prs_via_pulls() {
+        assert_eq!(
+            list_path("tokio-rs", "tokio", false, "open", 5).unwrap(),
+            "/search/issues?q=repo%3Atokio-rs%2Ftokio+is%3Aissue+state%3Aopen&sort=created&order=desc&per_page=5"
+        );
+        assert_eq!(
+            list_path("tokio-rs", "tokio", false, "all", 5).unwrap(),
+            "/search/issues?q=repo%3Atokio-rs%2Ftokio+is%3Aissue&sort=created&order=desc&per_page=5"
+        );
+        assert_eq!(list_path("a", "b", true, "closed", 3).unwrap(), "/repos/a/b/pulls?state=closed&sort=created&direction=desc&per_page=3");
+        assert!(list_path("a", "b", false, "merged; DROP", 3).is_err());
+    }
+
+    #[test]
+    fn renders_search_items_as_issue_list() {
+        let search = json!({"total_count": 1, "items": [{"number": 9, "title": "Bug", "state": "closed", "user": {"login": "ann"}, "created_at": "2026-10-08T00:00:00Z", "comments": 1}]});
+        assert!(render_list(&search, false, 10).contains("#9 Bug [closed] by @ann"));
+    }
 
     #[test]
     fn repo_summary() {

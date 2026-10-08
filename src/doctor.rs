@@ -20,6 +20,12 @@ pub async fn run() -> String {
         ok: ytdlp.is_ok(),
         detail: ytdlp.map(|v| format!("yt-dlp {}", v.trim())).unwrap_or_else(|_| "install yt-dlp from your package manager".into()),
     });
+    let deno = tools::find("deno");
+    checks.push(Check {
+        name: "youtube JS runtime (deno)",
+        ok: deno.is_some(),
+        detail: deno.map(|p| p.display().to_string()).unwrap_or_else(|| "install deno: yt-dlp needs it for YouTube".into()),
+    });
     let chrome = chrome::find_chrome();
     let chrome_found = chrome.is_some();
     checks.push(Check {

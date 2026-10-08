@@ -12,6 +12,35 @@ spyglass doctor                         spyglass x search|user|post            (
 
 Every result is wrapped in `<untrusted source="…" url="…">…</untrusted>` and sanitized.
 
+## Side-by-side: an agent with and without spyglass
+
+Same model (Claude Sonnet), same prompt, one run each (October 2026).
+**Without**: the agent's built-in web tools (WebFetch, WebSearch). **With**: spyglass only.
+
+| Task | Without spyglass | With spyglass |
+|---|---|---|
+| **Summarize a YouTube talk** (RustConf 2026 keynote, 29 min) with key points and timestamps | ❌ No content. The YouTube page returned only site navigation and the captions endpoint returned nothing. The agent fell back to the conference abstract and said it could not describe the talk. | ✅ Summary built from the full transcript: 7 key points with timestamps and a conclusion. |
+| **What's new in Rust 1.99, and what does r/rust think?** | ⚠️ Half done. It read the release blog, but only after guessing the URL because search did not find it. Reddit was unreachable (blocked, and a mirror returned 403), so there were no opinions. | ✅ Both parts. Release blog plus GitHub release notes, and 4 discussion threads from r/rust with authors and scores. |
+| **What do people on r/niri say about switching from Hyprland?** 3 quotes with authors | ❌ None. reddit.com and old.reddit.com could not be fetched, search refused reddit.com, and the mirror did not resolve. | ✅ 3 real quotes with usernames, upvotes and thread links, plus a note that the subreddit leans pro-niri. |
+| **tokio-rs/tokio: latest release and the newest issues** | ✅ Done from page summaries. It also caught an issue opened and closed the same day. | ✅ Done from raw API data: the full changelog with PR numbers. Open issues only by default (`--state all` includes closed ones). |
+
+The built-in tools work well on ordinary pages and GitHub. spyglass matters where they cannot reach: video transcripts and Reddit.
+
+## Requirements
+
+| Dependency | Needed for | Install |
+|---|---|---|
+| Linux or macOS | everything | Windows is not supported yet |
+| Google Chrome or Chromium | `search`, `reddit`, `x`, `web read --render` (the agent browser) | your package manager, or google.com/chrome |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | `youtube` | `pacman -S yt-dlp` · `brew install yt-dlp` · `pipx install yt-dlp` |
+| [Deno](https://deno.com) | `youtube`: yt-dlp runs YouTube's player JavaScript with it (the only runtime it enables by default) | `pacman -S deno` · `brew install deno` |
+| OS keyring (Secret Service: GNOME Keyring or KWallet; macOS Keychain) | `secrets set` (optional API keys) | usually already present on desktops |
+| `notify-send` (libnotify) | optional desktop notifications when the browser needs you (Linux) | `pacman -S libnotify` |
+
+`web read`, `rss` and `github` need nothing extra. `spyglass doctor` shows what is missing.
+
+To build from source you also need Rust 1.85+ (edition 2024), a C compiler and CMake (for the `aws-lc` crypto library).
+
 ## Install
 
 Prebuilt binaries for Linux (x86_64, arm64) and macOS (Apple Silicon, Intel) are on the
@@ -33,8 +62,7 @@ spyglass skill --install            # writes ~/.claude/skills/spyglass/SKILL.md 
 spyglass secrets set brave-api-key  # optional: paid search API instead of DuckDuckGo; stored in the OS keyring
 ```
 
-Runtime dependencies: Google Chrome or Chromium (search, Reddit, X, `--render`), `yt-dlp` (YouTube).
-No Python, no Node.js, no Docker.
+No Python runtime, no Node.js, no Docker for spyglass itself. See [Requirements](#requirements).
 
 ## The agent browser
 

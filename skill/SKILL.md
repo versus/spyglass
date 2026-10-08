@@ -22,7 +22,7 @@ One CLI, read-only. Every result is wrapped in `<untrusted source=… url=…>�
 | RSS/Atom feed | `spyglass rss <url> [--limit 10]` |
 | GitHub repo / README / file | `spyglass github repo o/r` · `spyglass github readme o/r` · `spyglass github file o/r path [--ref main]` |
 | GitHub search | `spyglass github search-repos "<q>"` · `spyglass github search-code "<q>"` |
-| GitHub issues / PRs | `spyglass github issues o/r [--state open]` · `spyglass github issue o/r N` · `spyglass github prs o/r` · `spyglass github pr o/r N` · `spyglass github releases o/r` |
+| GitHub issues / PRs | `spyglass github issues o/r [--state open|closed|all]` · `spyglass github issue o/r N` · `spyglass github prs o/r` · `spyglass github pr o/r N` · `spyglass github releases o/r` |
 | YouTube | `spyglass youtube video <url>` · `spyglass youtube transcript <url> [--lang en,ru]` · `spyglass youtube search "<q>"` |
 | Reddit | `spyglass reddit search "<q>" [--sub rust]` · `spyglass reddit sub <name> [--sort top]` · `spyglass reddit post <url>` |
 | What works | `spyglass doctor` |
