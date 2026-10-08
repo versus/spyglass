@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use serde_json::Value;
 
-use super::scenario::{Blocked, Ctx, Found, Site, arg_str, scrape, solve_by_user};
+use super::scenario::{Blocked, Ctx, Found, NAV_TIMEOUT, Site, arg_str, solve_by_user};
 use super::tab::Allow;
 
 pub const SITE: Site = Site { allow: Allow::AnyPublic, scratch: true, visible: false };
@@ -44,9 +44,10 @@ pub fn looks_blocked(title: &str, text: &str, status: Option<u16>) -> bool {
 pub async fn job(ctx: &Ctx<'_>, _verb: &str, args: &Value) -> Result<Found> {
     let url = crate::validate::public_url(arg_str(args, "url")?)?.to_string();
     let mut events = ctx.tab.events();
-    let script = "new Promise(r => setTimeout(r, 1500)).then(() => ({ url: location.href, title: document.title, \
-                  text: (document.body?.innerText || '').slice(0, 3000), html: document.documentElement.outerHTML }))";
-    let mut v = scrape(ctx.tab, &url, script).await?;
+    let script = "({ url: location.href, title: document.title, \
+                  text: (document.body?.innerText || '').slice(0, 3000), html: document.documentElement.outerHTML })";
+    ctx.tab.goto_settled(&url, NAV_TIMEOUT).await?;
+    let mut v = ctx.tab.eval(script).await?;
     // HTTP status of the main document, from the events seen while loading.
     let mut status = None;
     while let Ok(ev) = events.try_recv() {

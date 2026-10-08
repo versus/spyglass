@@ -65,6 +65,9 @@ async fn cached_resolve(cache: Arc<std::sync::Mutex<HashMap<String, Option<Vec<I
     addrs
 }
 
+/// Upper bound for waiting until a page stops loading resources after `load`.
+const SETTLE_MAX: Duration = Duration::from_secs(5);
+
 pub struct Tab {
     cdp: Cdp,
     pub target_id: String,
@@ -161,18 +164,37 @@ impl Tab {
 
     /// Navigate and wait for the load event.
     pub async fn goto(&self, url: &str, timeout: Duration) -> Result<()> {
+        self.navigate(url, timeout, false).await
+    }
+
+    /// Navigate, wait for `load`, then until the network is almost idle (at most 5 s):
+    /// late JavaScript content is in, without a fixed delay.
+    pub async fn goto_settled(&self, url: &str, timeout: Duration) -> Result<()> {
+        self.navigate(url, timeout, true).await
+    }
+
+    async fn navigate(&self, url: &str, timeout: Duration, settle: bool) -> Result<()> {
         let mut events = self.events();
         let nav = self.call("Page.navigate", json!({ "url": url })).await?;
         if let Some(err) = nav["errorText"].as_str() {
             bail!("navigation failed: {err}");
         }
-        // A reused tab may still deliver the previous page's `load`: wait for ours (same loaderId).
+        // A reused tab may still deliver the previous page's events: only ours count (same loaderId).
         let Some(loader) = nav["loaderId"].as_str() else { return Ok(()) }; // same-document navigation
+        let is = |e: &Event, name: &str| e.method == "Page.lifecycleEvent" && e.params["name"] == name && e.params["loaderId"] == loader;
+        // `networkAlmostIdle` may come before `load`: remember it instead of waiting for it again.
+        let idle = std::sync::atomic::AtomicBool::new(false);
         self.wait_for(&mut events, timeout, |e| {
-            e.method == "Page.lifecycleEvent" && e.params["name"] == "load" && e.params["loaderId"] == loader
+            if is(e, "networkAlmostIdle") {
+                idle.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            is(e, "load")
         })
-        .await
-        .map(|_| ())
+        .await?;
+        if settle && !idle.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = self.wait_for(&mut events, SETTLE_MAX, |e| is(e, "networkAlmostIdle")).await;
+        }
+        Ok(())
     }
 
     /// Wait for an event of this tab matching `pred`.
@@ -267,6 +289,10 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     flag.store(true, std::sync::atomic::Ordering::SeqCst);
                     in_tx.send(ev("L2")).await.unwrap();
+                    let idle = json!({ "method": "Page.lifecycleEvent", "sessionId": "S1",
+                                       "params": { "frameId": "F1", "loaderId": "L2", "name": "networkAlmostIdle" } });
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    in_tx.send(idle.to_string()).await.unwrap();
                 }
             }
         });
@@ -279,6 +305,17 @@ mod tests {
         let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
         tab.goto("https://example.com/", Duration::from_secs(5)).await.unwrap();
         assert!(real_load_sent.load(std::sync::atomic::Ordering::SeqCst), "returned on a stale load event");
+    }
+
+    #[tokio::test]
+    async fn settled_navigation_waits_for_network_idle_not_a_fixed_delay() {
+        let (cdp, _) = fake_chrome();
+        let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
+        let started = std::time::Instant::now();
+        tab.goto_settled("https://example.com/", Duration::from_secs(5)).await.unwrap();
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(150), "returned before idle: {took:?}");
+        assert!(took < Duration::from_secs(2), "fell back to the idle timeout: {took:?}");
     }
 
     #[test]
