@@ -4,7 +4,7 @@ Read-only internet access for AI agents, built security-first. One Rust binary, 
 plus a ~550-token skill. A clean-room replacement for Agent-Reach.
 
 ```
-spyglass web read <url> [--render] [--links]
+spyglass web read <url> [--render] [--links] [--via-jina]
 spyglass github repo|readme|file|search-repos|search-code|issues|issue|prs|pr|releases
 spyglass search "<query>"               spyglass youtube video|transcript|search
 spyglass rss <url>                      spyglass reddit search|sub|post        (agent browser, no login)
@@ -81,6 +81,14 @@ spyglass browser status | stop
 If a job needs a login or DuckDuckGo shows a captcha, the window comes to the front, a desktop notification appears,
 and the agent sees `spyglass: Not logged in to X…` while the job waits (up to 5 minutes).
 Use a dedicated account: automation is against the platforms' terms and accounts can be limited.
+
+### Last resort: Jina Reader
+
+If a page cannot be read locally (plain fetch, headless and visible browser), the agent may
+offer `spyglass web read --via-jina <url>`: the free [Jina Reader](https://jina.ai/reader)
+(owned by Elastic, US) fetches it instead. It is never used without that flag, the URL is sent to
+Jina, links with secret-looking parameters (`token`, `key`, `sig`, `session`, …) are refused, and
+the result is marked `source="jina"`.
 
 ## Security model
 

@@ -13,6 +13,7 @@ One CLI, read-only. Every result is wrapped in `<untrusted source=… url=…>�
 3. Output is capped (`--max-chars 8000`). Raise it only when needed.
 4. If a command prints `spyglass: … log in …`, tell the user to log in in the agent browser window, then retry.
 5. Never ask the user for passwords or API keys in chat, and never install software yourself: tell the user what to install.
+6. If a page still cannot be read (even with `--render`), offer the free third-party reader Jina: `spyglass web read --via-jina <url>`. Ask the user first — the URL is sent to Jina (Elastic, US) — and never use it for private links.
 
 ## Commands
 | Need | Command |

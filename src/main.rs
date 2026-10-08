@@ -271,6 +271,10 @@ enum WebCmd {
         /// Append the page's links (up to 50).
         #[arg(long)]
         links: bool,
+        /// Last resort, only with the user's consent: fetch through the free Jina Reader
+        /// (r.jina.ai, a third party that sees the URL). Private-looking links are refused.
+        #[arg(long, conflicts_with = "render")]
+        via_jina: bool,
     },
 }
 
@@ -278,6 +282,7 @@ impl Cmd {
     /// Short name for the audit log, e.g. "web read".
     fn label(&self) -> &'static str {
         match self {
+            Cmd::Web(WebCmd::Read { via_jina: true, .. }) => "web read --via-jina",
             Cmd::Web(WebCmd::Read { render: false, .. }) => "web read",
             Cmd::Web(WebCmd::Read { render: true, .. }) => "web read --render",
             Cmd::Reddit(_) => "reddit",
@@ -302,13 +307,14 @@ async fn run(cmd: &Cmd) -> Result<Out> {
         Cmd::Skill { install } => return skill::run(*install).map(Out::Plain),
         Cmd::Reddit(rc) => return reddit_cmd(rc).await.map(Out::Doc),
         Cmd::X(xc) => return x_cmd(xc).await.map(Out::Doc),
-        Cmd::Web(WebCmd::Read { url, render: true, links }) => {
+        Cmd::Web(WebCmd::Read { url, render: true, links, .. }) => {
             return browser::client::doc("web", "render", serde_json::json!({ "url": url, "links": links })).await.map(Out::Doc);
         }
         _ => {}
     }
     let net = net::Net::new()?;
     let doc = match cmd {
+        Cmd::Web(WebCmd::Read { url, via_jina: true, .. }) => platforms::jina::read(&net, url).await?,
         Cmd::Web(WebCmd::Read { url, links, .. }) => platforms::web::read(&net, url, *links).await?,
         Cmd::Rss { url, limit } => platforms::rss::read(&net, url, lim(*limit)).await?,
         Cmd::Github(g) => github_cmd(&net, g).await?,
@@ -463,6 +469,8 @@ mod tests {
         assert!(parse(&["x", "user", "@rustlang", "--limit", "5"]).is_ok());
         assert!(parse(&["web", "read", "--render", "https://example.com"]).is_ok());
         assert!(parse(&["browser", "login", "x"]).is_ok());
+        assert!(parse(&["web", "read", "--via-jina", "https://example.com"]).is_ok());
+        assert!(parse(&["web", "read", "--via-jina", "--render", "https://example.com"]).is_err(), "pick one way to fetch");
     }
 
     #[test]
