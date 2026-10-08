@@ -10,7 +10,7 @@ use crate::output::Doc;
 /// PDFs are larger than pages.
 const MAX_PAGE_BYTES: usize = 20 * 1024 * 1024;
 
-pub async fn read(net: &Net, url: &str) -> Result<Doc> {
+pub async fn read(net: &Net, url: &str, links: bool) -> Result<Doc> {
     let accept = "text/html,application/xhtml+xml,application/pdf,text/plain;q=0.8";
     let page = net.get(url, &[("Accept", accept)], MAX_PAGE_BYTES).await?;
     let final_url = page.url.to_string();
@@ -24,7 +24,16 @@ pub async fn read(net: &Net, url: &str) -> Result<Doc> {
     if !page.content_type.is_empty() && !page.content_type.contains("html") {
         bail!("unsupported content type: {}", page.content_type);
     }
-    Ok(with_hint(extract(&text, &final_url)?, false))
+    let doc = with_hint(extract(&text, &final_url)?, false);
+    Ok(if links { with_links(doc, &text, &final_url) } else { doc })
+}
+
+/// Append the "## Links" section (and the list in --json data).
+pub fn with_links(mut doc: Doc, html: &str, base: &str) -> Doc {
+    let (md, links) = links_section(html, base, 50);
+    doc.markdown.push_str(&format!("\n\n{md}"));
+    doc.data["links"] = serde_json::Value::Array(links);
+    doc
 }
 
 /// Append the thin-result note, if any, to the Markdown the agent sees.
@@ -113,6 +122,34 @@ pub fn pdf_to_doc(bytes: &[u8], url: &str) -> Result<Doc> {
     };
     let data = json!({ "title": name, "extraction": "pdf", "pages": pages.len(), "markdown": body });
     Ok(Doc::new("web", Some(url.to_string()), format!("# {name}\n\n{body}"), data))
+}
+
+/// "## Links" with unique absolute http(s) links (text → URL), for `--links`.
+pub fn links_section(html: &str, base: &str, max: usize) -> (String, Vec<serde_json::Value>) {
+    let page = dom_query::Document::from(html);
+    let base = url::Url::parse(base).ok();
+    let mut seen = std::collections::HashSet::new();
+    let mut links = Vec::new();
+    for a in page.select("a[href]").iter() {
+        let Some(href) = a.attr("href").filter(|h| !h.trim_start().starts_with('#')) else { continue };
+        let Some(mut target) = base.as_ref().and_then(|b| b.join(&href).ok()) else { continue };
+        if !matches!(target.scheme(), "http" | "https") {
+            continue;
+        }
+        target.set_fragment(None);
+        if seen.insert(target.to_string()) {
+            links.push(json!({ "text": crate::output::oneline(&a.text(), 120), "url": target.to_string() }));
+        }
+        if links.len() == max {
+            break;
+        }
+    }
+    let mut md = String::from("## Links\n");
+    for l in &links {
+        let (text, url) = (l["text"].as_str().unwrap_or(""), l["url"].as_str().unwrap_or(""));
+        md.push_str(&if text.is_empty() { format!("- {url}\n") } else { format!("- [{text}]({url})\n") });
+    }
+    (md, links)
 }
 
 /// A note for the agent when little text came out (likely a JS-rendered page).
@@ -210,6 +247,23 @@ its community, the compiler, the standard library, and the ecosystem of crates t
         assert!(is_pdf("application/pdf", b""));
         assert!(is_pdf("application/octet-stream", b"%PDF-1.7 ..."));
         assert!(!is_pdf("text/html", b"<html>"));
+    }
+
+    #[test]
+    fn links_section_lists_unique_absolute_web_links() {
+        let html = r##"<body><a href="/a">Alpha</a> <a href="https://e.com/a">Alpha again</a>
+            <a href="b.html">  Beta
+            link </a> <a href="#top">Top</a> <a href="javascript:x()">JS</a> <a href="mailto:a@b.c">Mail</a>
+            <a href="https://other.org/x?y=1">Other</a> <a href="/empty"></a></body>"##;
+        let (md, links) = links_section(html, "https://e.com/dir/page", 50);
+        assert!(md.starts_with("## Links\n"));
+        assert_eq!(links.len(), 4, "{md}");
+        assert!(md.contains("- [Alpha](https://e.com/a)"));
+        assert!(md.contains("- [Beta link](https://e.com/dir/b.html)"));
+        assert!(md.contains("- [Other](https://other.org/x?y=1)"));
+        assert!(md.contains("https://e.com/empty"), "a link without text keeps its URL");
+        assert!(!md.contains("javascript") && !md.contains("mailto") && !md.contains("#top"));
+        assert_eq!(links_section(html, "https://e.com/", 2).1.len(), 2);
     }
 
     #[test]

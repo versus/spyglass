@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::scenario::{Blocked, Ctx, Found, NAV_TIMEOUT, Site, arg_str, solve_by_user};
 use super::tab::Allow;
+use crate::platforms::web;
 
 pub const SITE: Site = Site { allow: Allow::AnyPublic, scratch: true, visible: false };
 
@@ -70,7 +71,10 @@ pub async fn job(ctx: &Ctx<'_>, _verb: &str, args: &Value) -> Result<Found> {
     }
     let str_of = |k: &str| v[k].as_str().unwrap_or("");
     let final_url = v["url"].as_str().unwrap_or(&url).to_string();
-    let doc = crate::platforms::web::with_hint(crate::platforms::web::extract(str_of("html"), &final_url)?, true);
+    let mut doc = web::with_hint(web::extract(str_of("html"), &final_url)?, true);
+    if args["links"].as_bool() == Some(true) {
+        doc = web::with_links(doc, str_of("html"), &final_url);
+    }
     Ok(Found { url: Some(final_url), markdown: doc.markdown, data: doc.data })
 }
 

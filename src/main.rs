@@ -268,6 +268,9 @@ enum WebCmd {
         /// Render JavaScript in the agent browser (cookie-less context).
         #[arg(long)]
         render: bool,
+        /// Append the page's links (up to 50).
+        #[arg(long)]
+        links: bool,
     },
 }
 
@@ -299,14 +302,14 @@ async fn run(cmd: &Cmd) -> Result<Out> {
         Cmd::Skill { install } => return skill::run(*install).map(Out::Plain),
         Cmd::Reddit(rc) => return reddit_cmd(rc).await.map(Out::Doc),
         Cmd::X(xc) => return x_cmd(xc).await.map(Out::Doc),
-        Cmd::Web(WebCmd::Read { url, render: true }) => {
-            return browser::client::doc("web", "render", serde_json::json!({ "url": url })).await.map(Out::Doc);
+        Cmd::Web(WebCmd::Read { url, render: true, links }) => {
+            return browser::client::doc("web", "render", serde_json::json!({ "url": url, "links": links })).await.map(Out::Doc);
         }
         _ => {}
     }
     let net = net::Net::new()?;
     let doc = match cmd {
-        Cmd::Web(WebCmd::Read { url, .. }) => platforms::web::read(&net, url).await?,
+        Cmd::Web(WebCmd::Read { url, links, .. }) => platforms::web::read(&net, url, *links).await?,
         Cmd::Rss { url, limit } => platforms::rss::read(&net, url, lim(*limit)).await?,
         Cmd::Github(g) => github_cmd(&net, g).await?,
         Cmd::Search { query, limit, provider } => platforms::search::search(&net, query, lim(*limit), *provider).await?,
