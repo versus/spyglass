@@ -113,6 +113,7 @@ impl Tab {
         for domain in ["Page.enable", "Network.enable", "Runtime.enable"] {
             cdp.call(domain, json!({}), s).await?;
         }
+        cdp.call("Page.setLifecycleEventsEnabled", json!({ "enabled": true }), s).await?;
         Ok(Tab { cdp: cdp.clone(), target_id, session, guard, allow, close_on_drop: true })
     }
 
@@ -180,7 +181,13 @@ impl Tab {
         if let Some(err) = nav["errorText"].as_str() {
             bail!("navigation failed: {err}");
         }
-        self.wait_for(&mut events, timeout, |e| e.method == "Page.loadEventFired").await.map(|_| ())
+        // A reused tab may still deliver the previous page's `load`: wait for ours (same loaderId).
+        let Some(loader) = nav["loaderId"].as_str() else { return Ok(()) }; // same-document navigation
+        self.wait_for(&mut events, timeout, |e| {
+            e.method == "Page.lifecycleEvent" && e.params["name"] == "load" && e.params["loaderId"] == loader
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Wait for an event of this tab matching `pred`.
@@ -245,6 +252,49 @@ mod tests {
     use super::*;
 
     const REDDIT: Allow = Allow::Domains(&["reddit.com", "redditstatic.com"]);
+
+    /// A scripted in-memory Chrome: answers commands, and after `Page.navigate`
+    /// emits a stale `load` from the previous navigation before the real one.
+    fn fake_chrome() -> (Cdp, Arc<std::sync::atomic::AtomicBool>) {
+        use tokio::sync::mpsc;
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
+        let (in_tx, in_rx) = mpsc::channel::<String>(64);
+        let real_load_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = real_load_sent.clone();
+        tokio::spawn(async move {
+            while let Some(raw) = out_rx.recv().await {
+                let msg: Value = serde_json::from_str(&raw).unwrap();
+                let result = match msg["method"].as_str().unwrap() {
+                    "Target.createTarget" => json!({ "targetId": "T1" }),
+                    "Target.attachToTarget" => json!({ "sessionId": "S1" }),
+                    "Page.navigate" => json!({ "frameId": "F1", "loaderId": "L2" }),
+                    _ => json!({}),
+                };
+                let navigate = msg["method"] == "Page.navigate";
+                in_tx.send(json!({ "id": msg["id"], "result": result }).to_string()).await.unwrap();
+                if navigate {
+                    let ev = |loader: &str| {
+                        json!({ "method": "Page.lifecycleEvent", "sessionId": "S1",
+                                "params": { "frameId": "F1", "loaderId": loader, "name": "load" } })
+                        .to_string()
+                    };
+                    in_tx.send(ev("L1")).await.unwrap(); // stale: previous page in this reused tab
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    in_tx.send(ev("L2")).await.unwrap();
+                }
+            }
+        });
+        (Cdp::new(out_tx, in_rx), real_load_sent)
+    }
+
+    #[tokio::test]
+    async fn goto_waits_for_the_load_of_its_own_navigation() {
+        let (cdp, real_load_sent) = fake_chrome();
+        let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
+        tab.goto("https://example.com/", Duration::from_secs(5)).await.unwrap();
+        assert!(real_load_sent.load(std::sync::atomic::Ordering::SeqCst), "returned on a stale load event");
+    }
 
     #[test]
     fn domain_allowlist() {

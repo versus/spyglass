@@ -97,9 +97,49 @@ pub fn launch(profile: &Path, headless: bool) -> Result<(Cdp, Child)> {
     Ok((Cdp::new(out_tx, in_rx), child))
 }
 
+/// Kills the browser if startup fails before ownership is handed over.
+pub struct KillOnDrop(Option<Child>);
+
+impl KillOnDrop {
+    pub fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    /// Startup succeeded: take the child back; it will no longer be killed.
+    pub fn disarm(mut self) -> Child {
+        self.0.take().expect("child present until disarmed")
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_on_drop_kills_unless_disarmed() {
+        let child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        drop(KillOnDrop::new(child));
+        assert!(!alive(pid), "killed and reaped");
+        let mut kept = KillOnDrop::new(std::process::Command::new("sleep").arg("30").spawn().unwrap()).disarm();
+        assert!(kept.try_wait().unwrap().is_none(), "disarmed child keeps running");
+        kept.kill().unwrap();
+        kept.wait().unwrap();
+    }
+
+    /// Portable liveness check without libc: `kill -0`.
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success())
+    }
 
     #[test]
     fn args_never_open_a_debugging_port_or_disable_sandbox() {

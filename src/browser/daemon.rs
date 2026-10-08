@@ -97,10 +97,13 @@ pub async fn serve(headless: bool) -> Result<()> {
         }
         std::fs::remove_file(&sock)?;
     }
-    let (cdp, mut child) = chrome::launch(&profile_dir(), headless)?;
-    let version = cdp.call("Browser.getVersion", json!({}), None).await?["product"].as_str().unwrap_or("").to_string();
+    // Claim the socket first: a concurrent second daemon fails here, before starting a Chrome.
     let listener = UnixListener::bind(&sock)?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+    let (cdp, child) = chrome::launch(&profile_dir(), headless)?;
+    let guard = chrome::KillOnDrop::new(child); // any startup error below kills Chrome
+    let version = cdp.call("Browser.getVersion", json!({}), None).await?["product"].as_str().unwrap_or("").to_string();
+    let mut child = guard.disarm();
 
     let (stop, mut stopped) = mpsc::channel::<()>(4);
     let chrome_exit = stop.clone();
@@ -108,6 +111,8 @@ pub async fn serve(headless: bool) -> Result<()> {
         let _ = child.wait(); // the user closed the window, or Browser.close
         let _ = chrome_exit.blocking_send(());
     });
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let state = Arc::new(State { cdp: cdp.clone(), headless, version, work: Mutex::default(), stop });
     loop {
         tokio::select! {
@@ -116,10 +121,14 @@ pub async fn serve(headless: bool) -> Result<()> {
                 tokio::spawn(handle(stream, state.clone()));
             }
             _ = stopped.recv() => break,
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
         }
     }
-    let _ = cdp.call("Browser.close", json!({}), None).await;
+    // Stop accepting before closing Chrome, so a successor daemon's socket is never removed.
+    drop(listener);
     let _ = std::fs::remove_file(&sock);
+    let _ = cdp.call("Browser.close", json!({}), None).await;
     Ok(())
 }
 
@@ -191,7 +200,13 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
             ))
         }
         Request::Job { platform, verb, args } => {
-            let mut work = state.work.lock().await;
+            let mut work = match state.work.try_lock() {
+                Ok(work) => work,
+                Err(_) => {
+                    let _ = notify.send(Reply::Waiting { message: "another browser job is running; queued".into() }).await;
+                    state.work.lock().await
+                }
+            };
             let cdp = &state.cdp;
             match platform.as_str() {
                 "reddit" => reddit_job(work.tab(cdp, false, reddit::ALLOW).await?, &verb, &args).await,
@@ -337,11 +352,12 @@ pub async fn ensure_session(
     )
     .await;
     let logged_in = wait_until(wait, || async { tab.cookie(cookie_url, cookie).await.ok().flatten() }).await;
-    if logged_in.is_some() {
-        login.close().await;
-        return Ok(());
+    // Close it either way, so login tabs do not pile up across attempts.
+    login.close().await;
+    match logged_in {
+        Some(_) => Ok(()),
+        None => bail!("timed out waiting for the {platform} login"),
     }
-    bail!("timed out waiting for the {platform} login")
 }
 
 /// Load `url` and return the body of the first GraphQL response for operation `op`.

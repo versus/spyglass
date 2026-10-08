@@ -67,8 +67,11 @@ pub async fn start(headless: bool) -> Result<()> {
     daemon_command(&std::env::current_exe()?, headless).stderr(log).spawn().context("starting the agent browser")?;
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        if is_running().await {
-            return Ok(());
+        match is_current().await {
+            Some(true) => return Ok(()),
+            // The old daemon outlived the upgrade: never run jobs on stale scenarios.
+            Some(false) => bail!("an older agent browser is still running; run `spyglass browser stop` and retry"),
+            None => {}
         }
     }
     bail!("the agent browser did not start; see {}", log_file.display())
