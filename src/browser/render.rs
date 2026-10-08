@@ -69,7 +69,7 @@ pub async fn job(ctx: &Ctx<'_>, _verb: &str, args: &Value) -> Result<Found> {
     }
     let str_of = |k: &str| v[k].as_str().unwrap_or("");
     let final_url = v["url"].as_str().unwrap_or(&url).to_string();
-    let doc = crate::platforms::web::extract(str_of("html"), &final_url)?;
+    let doc = crate::platforms::web::with_hint(crate::platforms::web::extract(str_of("html"), &final_url)?, true);
     Ok(Found { url: Some(final_url), markdown: doc.markdown, data: doc.data })
 }
 
