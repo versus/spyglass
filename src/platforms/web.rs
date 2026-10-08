@@ -46,15 +46,24 @@ pub fn with_hint(mut doc: Doc, rendered: bool) -> Doc {
 
 /// Below this much article text, Readability probably picked the wrong block (listings, home pages).
 const MIN_ARTICLE_CHARS: usize = 250;
+/// Above this share of link text, an "article" is really a list of links.
+const MAX_ARTICLE_LINK_RATIO: f64 = 0.5;
 
 /// Readability-style extraction of the main content, rendered as Markdown; pages that are
 /// not articles fall back to the whole page without scripts and site chrome.
 pub fn extract(html: &str, url: &str) -> Result<Doc> {
+    if let Some(doc) = job_posting(html, url) {
+        return Ok(doc);
+    }
     let article = Readability::new(html, Some(url), None).ok().and_then(|mut r| r.parse().ok());
     let Some(article) = article.filter(|a| a.text_content.trim().chars().count() >= MIN_ARTICLE_CHARS) else {
         return Ok(whole_page(html, url));
     };
     let body = html_to_markdown(&article.content);
+    // Mostly links means Readability picked navigation (e.g. "similar jobs"), not the content.
+    if link_ratio(&body) > MAX_ARTICLE_LINK_RATIO {
+        return Ok(whole_page(html, url));
+    }
     let title = article.title.trim();
     let markdown = if title.is_empty() || body.starts_with(&format!("# {title}")) { body.clone() } else { format!("# {title}\n\n{body}") };
     let data = json!({
@@ -150,6 +159,65 @@ pub fn links_section(html: &str, base: &str, max: usize) -> (String, Vec<serde_j
         md.push_str(&if text.is_empty() { format!("- {url}\n") } else { format!("- [{text}]({url})\n") });
     }
     (md, links)
+}
+
+/// A JSON-LD `JobPosting` (schema.org, required by Google for Jobs) as a clean posting.
+fn job_posting(html: &str, url: &str) -> Option<Doc> {
+    use serde_json::Value;
+    let page = dom_query::Document::from(html);
+    let scripts: Vec<Value> =
+        page.select(r#"script[type="application/ld+json"]"#).iter().filter_map(|s| serde_json::from_str::<Value>(&s.text()).ok()).collect();
+    // A script may hold one object, an array, or an @graph.
+    let job = scripts
+        .iter()
+        .flat_map(|v| match v {
+            Value::Array(items) => items.clone(),
+            v if v["@graph"].is_array() => v["@graph"].as_array().cloned().unwrap_or_default(),
+            v => vec![v.clone()],
+        })
+        .find(|v| v["@type"] == "JobPosting")?;
+    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
+    let title = text(&job["title"]);
+    let address = &job["jobLocation"]["address"];
+    let place = [text(&address["addressLocality"]), text(&address["addressCountry"])]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let date = text(&job["datePosted"]).chars().take(10).collect::<String>();
+    let facts: Vec<String> = [text(&job["hiringOrganization"]["name"]), place, text(&job["employmentType"]), date]
+        .into_iter()
+        .filter(|f| !f.is_empty())
+        .collect();
+    let description = html_to_markdown(&crate::output::unescape(job["description"].as_str()?));
+    let markdown = format!("# {title}\n\n{}\n\n{description}", facts.join(" · "));
+    Some(Doc::new("web", Some(url.to_string()), markdown, json!({ "title": title, "extraction": "job-posting", "job": job })))
+}
+
+/// Share of visible Markdown text that sits inside `[link text](url)`.
+pub fn link_ratio(md: &str) -> f64 {
+    let (mut link, mut total) = (0usize, 0usize);
+    let mut rest = md;
+    while !rest.is_empty() {
+        // A link: `[text](url)` — count the text as link text, skip the URL.
+        if let Some(after) = rest.strip_prefix('[') {
+            if let Some((text, tail)) = after.split_once("](") {
+                if let Some((_, after_url)) = tail.split_once(')') {
+                    let n = text.chars().filter(|c| !c.is_whitespace()).count();
+                    link += n;
+                    total += n;
+                    rest = after_url;
+                    continue;
+                }
+            }
+        }
+        let mut chars = rest.chars();
+        if chars.next().is_some_and(|c| !c.is_whitespace()) {
+            total += 1;
+        }
+        rest = chars.as_str();
+    }
+    if total == 0 { 0.0 } else { link as f64 / total as f64 }
 }
 
 /// A note for the agent when little text came out (likely a JS-rendered page).
@@ -264,6 +332,52 @@ its community, the compiler, the standard library, and the ecosystem of crates t
         assert!(md.contains("https://e.com/empty"), "a link without text keeps its URL");
         assert!(!md.contains("javascript") && !md.contains("mailto") && !md.contains("#top"));
         assert_eq!(links_section(html, "https://e.com/", 2).1.len(), 2);
+    }
+
+    #[test]
+    fn link_ratio_measures_how_much_text_is_links() {
+        assert!(link_ratio("Plain prose with no links at all.") < 0.01);
+        let nav =
+            "- [Senior DevOps](https://e.com/1) Luxoft\n- [Cloud Engineer](https://e.com/2) Atos\n- [DevOps Engineer](https://e.com/3)";
+        assert!(link_ratio(nav) > 0.5, "{}", link_ratio(nav));
+        let article = format!("{} see [docs](https://e.com/d).", "Long paragraph of real content. ".repeat(20));
+        assert!(link_ratio(&article) < 0.1);
+    }
+
+    #[test]
+    fn link_heavy_readability_picks_fall_back_to_the_page() {
+        // Readability may pick a "similar jobs" list over the real description.
+        let similar: String =
+            (0..30).map(|i| format!(r#"<li><a href="/jobs/{i}">Senior DevOps Engineer position number {i} at Example</a></li>"#)).collect();
+        let html = format!(
+            r#"<html><head><title>Cloud DevOps Engineer</title></head><body>
+            <div class="description"><p>We are hiring a Cloud DevOps Engineer to build AWS infrastructure.</p></div>
+            <section><h2>Similar jobs</h2><ul>{similar}</ul></section></body></html>"#
+        );
+        let doc = extract(&html, "https://jobs.example.com/view/1").unwrap();
+        assert!(doc.markdown.contains("We are hiring a Cloud DevOps Engineer"), "{}", doc.markdown);
+    }
+
+    const JOB: &str = r#"<html><head><title>Job | Board</title>
+<script type="application/ld+json">{"@context":"http://schema.org","@type":"JobPosting","title":"Cloud DevOps Engineer",
+"datePosted":"2026-10-07T10:00:00.000Z","employmentType":"FULL_TIME",
+"hiringOrganization":{"@type":"Organization","name":"Renesas Electronics"},
+"jobLocation":{"@type":"Place","address":{"@type":"PostalAddress","addressLocality":"Wrocław","addressCountry":"PL"}},
+"description":"&lt;strong&gt;About the Role&lt;/strong&gt;&lt;br&gt;We are hiring a Cloud DevOps Engineer.&lt;ul&gt;&lt;li&gt;Build AWS infrastructure&lt;/li&gt;&lt;li&gt;Own Terraform&lt;/li&gt;&lt;/ul&gt;"}</script>
+</head><body><nav>Jobs Menu</nav><div>Similar jobs: <a href="/1">Other job</a></div></body></html>"#;
+
+    #[test]
+    fn job_postings_come_from_structured_data() {
+        let doc = extract(JOB, "https://jobs.example.com/view/1").unwrap();
+        assert_eq!(doc.data["extraction"], "job-posting");
+        let md = &doc.markdown;
+        assert!(md.starts_with("# Cloud DevOps Engineer"), "{md}");
+        for part in
+            ["Renesas Electronics", "Wrocław, PL", "FULL_TIME", "2026-10-07", "**About the Role**", "We are hiring", "Own Terraform"]
+        {
+            assert!(md.contains(part), "missing {part}: {md}");
+        }
+        assert!(!md.contains("Similar jobs"));
     }
 
     #[test]
