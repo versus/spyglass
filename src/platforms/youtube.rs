@@ -240,6 +240,35 @@ pub fn render_search(v: &Value) -> String {
     if md.is_empty() { "No results.".into() } else { md }
 }
 
+/// yt-dlp extractor arguments: top comments, `n` threads, no replies.
+pub fn comment_extractor_args(n: usize) -> String {
+    format!("youtube:max_comments={n},{n},0,0;comment_sort=top")
+}
+
+pub fn render_comments(v: &Value, limit: usize) -> String {
+    let top: Vec<&Value> = v["comments"].as_array().into_iter().flatten().filter(|c| c["parent"] == "root").take(limit).collect();
+    let mut md = format!("# Comments: {}\n\nTop comments, {} shown\n", v["title"].as_str().unwrap_or(""), top.len());
+    for c in top {
+        md.push_str(&format!(
+            "\n- **{}** (♥{}): {}",
+            c["author"].as_str().unwrap_or(""),
+            c["like_count"].as_u64().unwrap_or(0),
+            oneline(c["text"].as_str().unwrap_or(""), 600)
+        ));
+    }
+    md
+}
+
+/// Top comments of a video (no replies).
+pub async fn comments(input: &str, limit: usize) -> Result<Doc> {
+    let url = video_url(input)?;
+    let extractor = comment_extractor_args(limit);
+    let mut args = BASE_ARGS.to_vec();
+    args.extend(["--write-comments", "--extractor-args", extractor.as_str(), "--dump-single-json", "--", url.as_str()]);
+    let v: Value = serde_json::from_str(&ytdlp(&args).await?)?;
+    Ok(Doc::new("youtube", Some(url), render_comments(&v, limit), v["comments"].clone()))
+}
+
 /// Keep only useful metadata for --json (the raw dump is ~100 KB of formats).
 fn slim(v: &Value) -> Value {
     let keys = [
@@ -333,6 +362,27 @@ mod tests {
     fn groups_paragraphs_with_timestamps() {
         let lines = vec![(0, "a".to_string()), (10_000, "b".into()), (31_000, "c".into()), (3_700_000, "d".into())];
         assert_eq!(paragraphs(&lines), "[00:00] a b\n\n[00:31] c\n\n[61:40] d");
+    }
+
+    #[test]
+    fn renders_top_level_comments() {
+        let v = json!({"title":"City 20","comment_count":312,"comments":[
+            {"author":"@viewer1","text":"Отличная игра!\nЖдём продолжения","like_count":120,"timestamp":1791370000,"parent":"root"},
+            {"author":"@reply","text":"согласен","like_count":3,"parent":"abc"},
+            {"author":"@viewer2","text":"Слишком много багов","like_count":45,"parent":"root"}
+        ]});
+        let md = render_comments(&v, 10);
+        assert!(md.starts_with("# Comments: City 20"), "{md}");
+        assert!(md.contains("Top comments, 2 shown"), "{md}");
+        assert!(md.contains("- **@viewer1** (♥120): Отличная игра! Ждём продолжения"));
+        assert!(md.contains("@viewer2"));
+        assert!(!md.contains("согласен"), "replies are skipped");
+        assert_eq!(render_comments(&v, 1).matches("- **").count(), 1);
+    }
+
+    #[test]
+    fn comment_args_ask_for_top_comments_without_replies() {
+        assert_eq!(comment_extractor_args(25), "youtube:max_comments=25,25,0,0;comment_sort=top");
     }
 
     #[test]

@@ -160,6 +160,12 @@ enum YtCmd {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+    /// Top comments (no replies).
+    Comments {
+        video: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -322,6 +328,7 @@ async fn run(cmd: &Cmd) -> Result<Out> {
         Cmd::Youtube(YtCmd::Video { video }) => platforms::youtube::video(video).await?,
         Cmd::Youtube(YtCmd::Transcript { video, lang }) => platforms::youtube::transcript(&net, video, lang).await?,
         Cmd::Youtube(YtCmd::Search { query, limit }) => platforms::youtube::search(query, lim(*limit)).await?,
+        Cmd::Youtube(YtCmd::Comments { video, limit }) => platforms::youtube::comments(video, lim(*limit)).await?,
         Cmd::Secrets(_) | Cmd::Browser(_) | Cmd::Reddit(_) | Cmd::X(_) | Cmd::Doctor | Cmd::Skill { .. } => {
             unreachable!("handled above")
         }
