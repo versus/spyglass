@@ -7,6 +7,11 @@ use url::Url;
 
 const BLOCKED_SUFFIXES: &[&str] = &[".localhost", ".local", ".internal", ".lan", ".home.arpa", ".localdomain"];
 
+/// Percent-encode a query-string component.
+pub fn enc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
 /// Parse a URL that must point to a public HTTP(S) host.
 pub fn public_url(input: &str) -> Result<Url> {
     if input.chars().any(char::is_control) {

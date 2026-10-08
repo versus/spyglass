@@ -4,7 +4,6 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -14,10 +13,10 @@ use tokio::sync::{Mutex, mpsc};
 
 use super::cdp::Cdp;
 use super::proto::{Reply, Request};
+use super::scenario::{Ctx, Found, NAV_TIMEOUT};
 use super::tab::{Allow, Tab};
-use super::{chrome, reddit, x};
+use super::{chrome, ddg, reddit, render, x};
 
-const NAV_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_REQUEST: u64 = 64 * 1024;
 
 fn base_dir() -> PathBuf {
@@ -42,6 +41,12 @@ pub fn build_id() -> String {
         exe.map(|e| e.display().to_string()).unwrap_or_default(),
         mtime.map(|d| d.as_secs()).unwrap_or(0)
     )
+}
+
+/// One line to the daemon log (its stderr is redirected there by the client).
+fn log(line: &str) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    eprintln!("{ts} {}", crate::output::oneline(line, 500));
 }
 
 pub fn profile_dir() -> PathBuf {
@@ -174,15 +179,16 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
             let targets = state.cdp.call("Target.getTargets", json!({}), None).await?;
             let tabs = targets["targetInfos"].as_array().map(|t| t.iter().filter(|t| t["type"] == "page").count()).unwrap_or(0);
             let mode = if state.headless { "headless" } else { "visible" };
-            Ok(done(
-                None,
-                format!("agent browser running ({}, {mode}, {tabs} tabs)", state.version),
-                json!({ "headless": state.headless, "version": state.version, "build": build_id(), "tabs": tabs }),
-            ))
+            Ok(Found {
+                url: None,
+                markdown: format!("agent browser running ({}, {mode}, {tabs} tabs)", state.version),
+                data: json!({ "headless": state.headless, "version": state.version, "build": build_id(), "tabs": tabs }),
+            }
+            .into())
         }
         Request::Stop => {
             let _ = state.stop.send(()).await;
-            Ok(done(None, "agent browser stopping".into(), Value::Null))
+            Ok(Found { url: None, markdown: "agent browser stopping".into(), data: Value::Null }.into())
         }
         Request::Login { platform } => {
             let url = match platform.as_str() {
@@ -193,11 +199,8 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
             let tab = Tab::open(&state.cdp, None, None).await?.keep_open();
             let _ = tab.goto(url, NAV_TIMEOUT).await;
             tab.focus().await?;
-            Ok(done(
-                Some(url.into()),
-                format!("Log in to {platform} in the agent browser window. The session stays in the agent profile only."),
-                Value::Null,
-            ))
+            let markdown = format!("Log in to {platform} in the agent browser window. The session stays in the agent profile only.");
+            Ok(Found { url: Some(url.into()), markdown, data: Value::Null }.into())
         }
         Request::Job { platform, verb, args } => {
             let mut work = match state.work.try_lock() {
@@ -207,179 +210,26 @@ async fn dispatch(req: Request, state: &State, notify: &mpsc::Sender<Reply>) -> 
                     state.work.lock().await
                 }
             };
-            let cdp = &state.cdp;
-            match platform.as_str() {
-                "reddit" => reddit_job(work.tab(cdp, false, reddit::ALLOW).await?, &verb, &args).await,
-                "x" => {
-                    let tab = work.tab(cdp, false, x::ALLOW).await?;
-                    x::job(cdp, tab, &verb, &args, notify).await.map(|(url, md, data)| done(Some(url), md, data))
-                }
-                "web" if verb == "render" => web_render(work.tab(cdp, true, Allow::AnyPublic).await?, &args).await,
-                "search" if verb == "ddg" => {
-                    ddg_search(work.tab(cdp, false, Allow::Domains(&["duckduckgo.com"])).await?, &args, notify).await
-                }
-                _ => bail!("unknown job {platform} {verb}"),
+            let site = match platform.as_str() {
+                "reddit" => reddit::SITE,
+                "x" => x::SITE,
+                "search" => ddg::SITE,
+                "web" => render::SITE,
+                _ => bail!("unknown platform {platform:?}"),
+            };
+            let tab = work.tab(&state.cdp, site.scratch, site.allow).await?;
+            let ctx = Ctx { cdp: &state.cdp, tab, notify };
+            log(&format!("job {platform} {verb}"));
+            let found = match platform.as_str() {
+                "reddit" => reddit::job(&ctx, &verb, &args).await,
+                "x" => x::job(&ctx, &verb, &args).await,
+                "search" => ddg::job(&ctx, &verb, &args).await,
+                _ => render::job(&ctx, &verb, &args).await,
+            };
+            if let Err(e) = &found {
+                log(&format!("job {platform} {verb} failed: {e:#}"));
             }
+            found.map(Reply::from)
         }
     }
-}
-
-fn done(url: Option<String>, markdown: String, data: Value) -> Reply {
-    Reply::Done { url, markdown, data }
-}
-
-pub fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    args[key].as_str().with_context(|| format!("missing argument {key}"))
-}
-
-pub fn arg_usize(args: &Value, key: &str, default: usize) -> usize {
-    args[key].as_u64().map(|n| n as usize).unwrap_or(default).clamp(1, 100)
-}
-
-/// Load `url` in the agent tab and run one of our scripts.
-async fn scrape(tab: &Tab, url: &str, script: &str) -> Result<Value> {
-    tab.goto(url, NAV_TIMEOUT).await?;
-    tab.eval(script).await
-}
-
-/// Page script: wait (≤10 s) until `ready` matches or the block page shows, then extract.
-fn when_ready(ready: &str, blocked_marker: &str, extract: &str) -> String {
-    format!(
-        "new Promise(resolve => {{ const t0 = Date.now(); const tick = () => {{
-            if ((document.body?.innerText || '').includes({blocked_marker:?})) return resolve({{ blocked: true }});
-            if (document.querySelector({ready:?}) || Date.now() - t0 > 10000) return resolve({{ data: {extract} }});
-            setTimeout(tick, 250); }}; tick(); }})"
-    )
-}
-
-async fn reddit_job(tab: &Tab, verb: &str, args: &Value) -> Result<Reply> {
-    let limit = arg_usize(args, "limit", 10);
-    let (url, ready, script) = match verb {
-        "search" => (reddit::search_url(arg_str(args, "query")?, args["sub"].as_str())?, reddit::SEARCH_READY, reddit::SEARCH_JS),
-        "sub" => (reddit::sub_url(arg_str(args, "name")?, args["sort"].as_str().unwrap_or("hot"))?, "shreddit-post", reddit::LISTING_JS),
-        "post" => (reddit::post_url(arg_str(args, "post")?)?, reddit::POST_READY, reddit::POST_JS),
-        _ => bail!("unknown reddit command {verb}"),
-    };
-    let script = when_ready(ready, reddit::BLOCKED_MARKER, script);
-    let v = scrape(tab, &url, &script).await?;
-    if v["blocked"] == true {
-        bail!(
-            "Reddit blocked the agent browser. Use the visible mode (`spyglass browser start`) or log in: `spyglass browser login reddit`"
-        );
-    }
-    let data = v["data"].clone();
-    let md = match verb {
-        "search" => reddit::render_search(&data, limit),
-        "sub" => reddit::render_listing(&data, limit),
-        _ if data.is_null() => bail!("no post found at {url}"),
-        _ => reddit::render_post(&data, arg_usize(args, "comments", 30)),
-    };
-    Ok(done(Some(url), md, data))
-}
-
-async fn ddg_search(tab: &Tab, args: &Value, notify: &mpsc::Sender<Reply>) -> Result<Reply> {
-    use crate::platforms::search;
-    let q: String = url::form_urlencoded::byte_serialize(crate::validate::query(arg_str(args, "query")?)?.as_bytes()).collect();
-    let url = format!("https://html.duckduckgo.com/html/?q={q}");
-    tab.goto(&url, NAV_TIMEOUT).await?;
-    let page = || async { search::parse_ddg(tab.eval("document.documentElement.outerHTML").await?.as_str().unwrap_or("")) };
-    let mut results = match page().await {
-        Ok(r) => r,
-        Err(_) => {
-            // A captcha: hand the tab to the user and continue once it is solved.
-            tab.focus().await?;
-            ask_user(notify, "DuckDuckGo shows a captcha. Please solve it in the agent browser window (waiting up to 120s).").await;
-            wait_until(Duration::from_secs(120), || async { page().await.ok() })
-                .await
-                .context("the DuckDuckGo captcha was not solved in time")?
-        }
-    };
-    results.truncate(arg_usize(args, "limit", 8));
-    Ok(done(Some(url), search::render_ddg(&results), Value::Array(results)))
-}
-
-/// Tell the user (desktop notification + the agent's stderr) that the browser needs them.
-async fn ask_user(notify: &mpsc::Sender<Reply>, message: &str) {
-    // notify-send needs the session bus and display; nothing else is passed.
-    let session = crate::tools::Extra {
-        pass_env: &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"],
-        ..Default::default()
-    };
-    let args = ["--app-name=spyglass", "--", "spyglass", message];
-    let _ = crate::tools::run_with("notify-send", &args, Duration::from_secs(5), 1024, &session).await;
-    let _ = notify.send(Reply::Waiting { message: message.to_string() }).await;
-}
-
-/// Poll `check` every 2 s until it yields a value or `wait` elapses.
-async fn wait_until<T, F, Fut>(wait: Duration, check: F) -> Option<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Option<T>>,
-{
-    let deadline = tokio::time::Instant::now() + wait;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if let Some(v) = check().await {
-            return Some(v);
-        }
-    }
-    None
-}
-
-async fn web_render(tab: &Tab, args: &Value) -> Result<Reply> {
-    let url = crate::validate::public_url(arg_str(args, "url")?)?.to_string();
-    let script = "new Promise(r => setTimeout(r, 1500)).then(() => ({ url: location.href, html: document.documentElement.outerHTML }))";
-    let v = scrape(tab, &url, script).await?;
-    let final_url = v["url"].as_str().unwrap_or(&url).to_string();
-    let doc = crate::platforms::web::extract(v["html"].as_str().unwrap_or(""), &final_url)?;
-    Ok(done(Some(final_url), doc.markdown, doc.data))
-}
-
-/// Make sure the persistent profile is logged in to a platform. If not, open the
-/// login page in a visible tab, tell the user, and wait for the session cookie.
-pub async fn ensure_session(
-    cdp: &Cdp,
-    tab: &Tab,
-    platform: &str,
-    (cookie_url, cookie): (&str, &str),
-    login_url: &str,
-    wait: Duration,
-    notify: &mpsc::Sender<Reply>,
-) -> Result<()> {
-    if tab.cookie(cookie_url, cookie).await?.is_some() {
-        return Ok(());
-    }
-    let login = Tab::open(cdp, None, None).await?.keep_open();
-    let _ = login.goto(login_url, NAV_TIMEOUT).await;
-    let _ = login.focus().await;
-    ask_user(
-        notify,
-        &format!("Not logged in to {platform}. Please log in in the agent browser window (waiting up to {}s).", wait.as_secs()),
-    )
-    .await;
-    let logged_in = wait_until(wait, || async { tab.cookie(cookie_url, cookie).await.ok().flatten() }).await;
-    // Close it either way, so login tabs do not pile up across attempts.
-    login.close().await;
-    match logged_in {
-        Some(_) => Ok(()),
-        None => bail!("timed out waiting for the {platform} login"),
-    }
-}
-
-/// Load `url` and return the body of the first GraphQL response for operation `op`.
-pub async fn capture_graphql(tab: &Tab, url: &str, op: &str, wait: Duration) -> Result<String> {
-    let mut events = tab.events();
-    tab.goto(url, NAV_TIMEOUT).await?;
-    let marker = "/graphql/";
-    let op_path = format!("/{op}");
-    let response = tab
-        .wait_for(&mut events, wait, |e| {
-            e.method == "Network.responseReceived"
-                && e.params["response"]["url"].as_str().is_some_and(|u| u.contains(marker) && u.contains(&op_path))
-        })
-        .await
-        .with_context(|| format!("the page did not load {op} data"))?;
-    let id = response.params["requestId"].as_str().unwrap_or("").to_string();
-    tab.wait_for(&mut events, wait, |e| e.method == "Network.loadingFinished" && e.params["requestId"] == id.as_str()).await?;
-    tab.response_body(&id).await
 }

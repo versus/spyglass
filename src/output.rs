@@ -230,6 +230,11 @@ fn sanitize_json(v: &mut Value) {
     }
 }
 
+/// A string field of a JSON object, or "" (for rendering API data).
+pub fn str_at<'v>(v: &'v Value, key: &str) -> &'v str {
+    v[key].as_str().unwrap_or("")
+}
+
 /// Shorten a single-line field (titles, snippets) for list rendering.
 pub fn oneline(s: &str, max: usize) -> String {
     let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");

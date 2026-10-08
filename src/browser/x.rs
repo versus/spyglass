@@ -5,24 +5,21 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
-use serde_json::{Value, json};
-use tokio::sync::mpsc;
-
-use super::cdp::Cdp;
-use super::daemon::{arg_str, arg_usize, capture_graphql, ensure_session};
-use super::proto::Reply;
-use super::tab::{Allow, Tab};
+use super::scenario::{Ctx, Found, Site, arg_str, arg_usize, capture_graphql, ensure_session};
+use super::tab::Allow;
 use crate::output::oneline;
 use crate::validate;
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 
 pub const LOGIN_URL: &str = "https://x.com/i/flow/login";
-pub const ALLOW: Allow = Allow::Domains(&["x.com", "twitter.com", "twimg.com"]);
+pub const SITE: Site = Site { allow: Allow::Domains(&["x.com", "twitter.com", "twimg.com"]), scratch: false };
 const SESSION_COOKIE: (&str, &str) = ("https://x.com", "auth_token");
 const LOGIN_WAIT: Duration = Duration::from_secs(300);
 const DATA_WAIT: Duration = Duration::from_secs(25);
 
-pub async fn job(cdp: &Cdp, tab: &Tab, verb: &str, args: &Value, notify: &mpsc::Sender<Reply>) -> Result<(String, String, Value)> {
+/// `x search|post|user` in the agent tab, after making sure the user is logged in.
+pub async fn job(ctx: &Ctx<'_>, verb: &str, args: &Value) -> Result<Found> {
     let limit = arg_usize(args, "limit", 10);
     let (url, op) = match verb {
         "search" => (search_url(arg_str(args, "query")?, args["latest"].as_bool().unwrap_or(false))?, "SearchTimeline"),
@@ -30,15 +27,15 @@ pub async fn job(cdp: &Cdp, tab: &Tab, verb: &str, args: &Value, notify: &mpsc::
         "user" => (format!("https://x.com/{}", validate::x_handle(arg_str(args, "handle")?)?), "UserTweets"),
         _ => bail!("unknown x command {verb}"),
     };
-    ensure_session(cdp, tab, "X", SESSION_COOKIE, LOGIN_URL, LOGIN_WAIT, notify).await?;
-    let body = capture_graphql(tab, &url, op, DATA_WAIT).await?;
+    ensure_session(ctx, "X", SESSION_COOKIE, LOGIN_URL, LOGIN_WAIT).await?;
+    let body = capture_graphql(ctx.tab, &url, op, DATA_WAIT).await?;
     let tweets = extract_tweets(&serde_json::from_str(&body)?);
     let shown: Vec<&Tweet> = tweets.iter().take(limit).collect();
-    Ok((url, render(&tweets, limit), json!(shown)))
+    Ok(Found { url: Some(url), markdown: render(&tweets, limit), data: json!(shown) })
 }
 
 pub fn search_url(query: &str, latest: bool) -> Result<String> {
-    let q: String = url::form_urlencoded::byte_serialize(validate::query(query)?.as_bytes()).collect();
+    let q = validate::enc(&validate::query(query)?);
     Ok(format!("https://x.com/search?q={q}&src=typed_query{}", if latest { "&f=live" } else { "" }))
 }
 

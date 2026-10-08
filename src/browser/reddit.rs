@@ -4,12 +4,13 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use super::scenario::{Ctx, Found, Site, arg_str, arg_usize, scrape, when_ready};
 use super::tab::Allow;
-use crate::output::oneline;
-use crate::validate;
+use crate::output::{oneline, str_at as s};
+use crate::validate::{self, enc};
 
 pub const LOGIN_URL: &str = "https://www.reddit.com/login/";
-pub const ALLOW: Allow = Allow::Domains(&["reddit.com", "redditstatic.com", "redditmedia.com"]);
+pub const SITE: Site = Site { allow: Allow::Domains(&["reddit.com", "redditstatic.com", "redditmedia.com"]), scratch: false };
 pub const BLOCKED_MARKER: &str = "blocked by network security";
 pub const SEARCH_READY: &str = r#"a[data-testid="post-title"]"#;
 /// Comments render after the post; a post without comments has nothing more to wait for.
@@ -60,10 +61,6 @@ pub const SEARCH_JS: &str = r#"(() => { const seen = new Set(); return [...docum
 
 const BASE: &str = "https://www.reddit.com";
 
-fn enc(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
-}
-
 pub fn search_url(query: &str, sub: Option<&str>) -> Result<String> {
     let q = enc(&validate::query(query)?);
     Ok(match sub {
@@ -93,10 +90,6 @@ pub fn post_url(input: &str) -> Result<String> {
     url.set_query(None);
     url.set_fragment(None);
     Ok(url.to_string())
-}
-
-fn s<'v>(v: &'v Value, k: &str) -> &'v str {
-    v[k].as_str().unwrap_or("")
 }
 
 fn abs(permalink: &str) -> String {
@@ -169,6 +162,32 @@ pub fn render_post(v: &Value, max_comments: usize) -> String {
         }
     }
     md
+}
+
+/// `reddit search|sub|post` in the agent tab.
+pub async fn job(ctx: &Ctx<'_>, verb: &str, args: &Value) -> Result<Found> {
+    let limit = arg_usize(args, "limit", 10);
+    let (url, ready, script) = match verb {
+        "search" => (search_url(arg_str(args, "query")?, args["sub"].as_str())?, SEARCH_READY, SEARCH_JS),
+        "sub" => (sub_url(arg_str(args, "name")?, args["sort"].as_str().unwrap_or("hot"))?, "shreddit-post", LISTING_JS),
+        "post" => (post_url(arg_str(args, "post")?)?, POST_READY, POST_JS),
+        _ => bail!("unknown reddit command {verb}"),
+    };
+    let script = when_ready(ready, BLOCKED_MARKER, script);
+    let v = scrape(ctx.tab, &url, &script).await?;
+    if v["blocked"] == true {
+        bail!(
+            "Reddit blocked the agent browser. Use the visible mode (`spyglass browser start`) or log in: `spyglass browser login reddit`"
+        );
+    }
+    let data = v["data"].clone();
+    let md = match verb {
+        "search" => render_search(&data, limit),
+        "sub" => render_listing(&data, limit),
+        _ if data.is_null() => bail!("no post found at {url}"),
+        _ => render_post(&data, arg_usize(args, "comments", 30)),
+    };
+    Ok(Found { url: Some(url), markdown: md, data })
 }
 
 #[cfg(test)]

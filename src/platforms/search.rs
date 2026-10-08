@@ -37,7 +37,7 @@ pub async fn search(net: &Net, query: &str, limit: usize, explicit: Option<Provi
         Provider::Ddg => return crate::browser::client::doc("search", "ddg", json!({ "query": q, "limit": limit })).await,
         Provider::Brave => {
             let key = brave.unwrap_or_default();
-            let q = url::form_urlencoded::byte_serialize(q.as_bytes()).collect::<String>();
+            let q = validate::enc(&q);
             let url = format!("https://api.search.brave.com/res/v1/web/search?q={q}&count={limit}");
             let v = net.get_json(&url, &[("Accept", "application/json"), ("X-Subscription-Token", &key)]).await?;
             (render_brave(&v), v["web"]["results"].clone())

@@ -4,9 +4,9 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::net::Net;
-use crate::output::{Doc, oneline};
+use crate::output::{Doc, oneline, str_at as s};
 use crate::secrets::{self, Secret};
-use crate::validate;
+use crate::validate::{self, enc};
 
 const API: &str = "https://api.github.com";
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -108,14 +108,6 @@ impl<'a> GitHub<'a> {
 
 fn doc(owner: &str, repo: &str, markdown: String, data: Value) -> Doc {
     Doc::new("github", Some(format!("https://github.com/{owner}/{repo}")), markdown, data)
-}
-
-fn enc(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
-}
-
-fn s<'v>(v: &'v Value, key: &str) -> &'v str {
-    v[key].as_str().unwrap_or("")
 }
 
 fn date<'v>(v: &'v Value, key: &str) -> &'v str {
