@@ -163,10 +163,23 @@ impl Tab {
                         // A worker, service worker or cross-site frame, paused before it runs:
                         // put the same guard on it first, then let it go. If that fails it stays paused.
                         let Some(child) = ev.params["sessionId"].as_str().map(str::to_string) else { continue };
+                        let kind = ev.params["targetInfo"]["type"].as_str().unwrap_or("?").to_string();
                         guarded.lock().unwrap_or_else(|e| e.into_inner()).insert(child.clone());
                         let cdp = cdp.clone();
                         tokio::spawn(async move {
-                            if guard_session(&cdp, &child, true).await.is_ok() {
+                            let guarded = match guard_session(&cdp, &child, true).await {
+                                Ok(()) => true,
+                                // Dedicated workers have no Fetch domain of their own, but their
+                                // requests still arrive as Fetch.requestPaused on their session
+                                // (verified on Chrome 155), so the guard covers them.
+                                Err(_) if kind == "worker" => true,
+                                // Anything else: fail closed, with a trace in the daemon log.
+                                Err(e) => {
+                                    eprintln!("{kind} target left paused: no network guard ({e:#})");
+                                    false
+                                }
+                            };
+                            if guarded {
                                 let _ = cdp.call("Runtime.runIfWaitingForDebugger", json!({}), Some(&child)).await;
                             }
                         });
@@ -341,7 +354,7 @@ mod tests {
         (Cdp::new(out_tx, in_rx), real_load_sent)
     }
 
-    use crate::browser::testkit::{position, recording_chrome};
+    use crate::browser::testkit::{position, recording_chrome, recording_chrome_failing};
 
     #[tokio::test]
     async fn workers_and_frames_are_guarded_before_they_run() {
@@ -368,6 +381,32 @@ mod tests {
         inject.send(paused.to_string()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(position(&sent, "Fetch.failRequest", "W1").is_some());
+    }
+
+    /// A child target whose own Fetch domain is missing (as for dedicated workers in Chrome).
+    async fn child_without_fetch(kind: &str) -> bool {
+        let (cdp, inject, sent) = recording_chrome_failing(|m| m["method"] == "Fetch.enable" && m["sessionId"] == "C1");
+        let guard = Guard { allow: Allow::Domains(&["example.com"]), block_media: true };
+        let _tab = Tab::open(&cdp, None, Some(guard)).await.unwrap().keep_open();
+        let attached = json!({ "method": "Target.attachedToTarget", "sessionId": "S1",
+            "params": { "sessionId": "C1", "targetInfo": { "type": kind }, "waitingForDebugger": true } });
+        inject.send(attached.to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        position(&sent, "Runtime.runIfWaitingForDebugger", "C1").is_some()
+    }
+
+    #[tokio::test]
+    async fn dedicated_workers_run_because_their_page_intercepts_for_them() {
+        // Verified on Chrome 155: a dedicated worker has no Fetch domain, yet its requests
+        // arrive as Fetch.requestPaused on its session through the page's interception.
+        assert!(child_without_fetch("worker").await);
+    }
+
+    #[tokio::test]
+    async fn other_children_without_a_guard_stay_paused() {
+        for kind in ["service_worker", "shared_worker", "iframe"] {
+            assert!(!child_without_fetch(kind).await, "{kind} must stay paused (fail closed)");
+        }
     }
 
     #[tokio::test]

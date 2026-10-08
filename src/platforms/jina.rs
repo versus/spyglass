@@ -12,8 +12,28 @@ use crate::validate;
 
 const READER: &str = "https://r.jina.ai/";
 
-/// Query parameters that suggest a private or authenticated link.
-const SECRET_PARAMS: &[&str] = &["token", "key", "sig", "secret", "session", "password", "passwd", "auth", "code", "credential", "otp"];
+/// Words in query parameter names that suggest a private or authenticated link.
+/// Matched as whole words of the name (`api_key`, `X-Amz-Signature`), not substrings (`keyword`).
+const SECRET_WORDS: &[&str] = &[
+    "token",
+    "key",
+    "apikey",
+    "sig",
+    "signature",
+    "secret",
+    "session",
+    "sessionid",
+    "sid",
+    "password",
+    "passwd",
+    "pwd",
+    "auth",
+    "code",
+    "credential",
+    "credentials",
+    "otp",
+    "jwt",
+];
 
 pub async fn read(net: &Net, input: &str) -> Result<Doc> {
     let url = validate::public_url(input)?;
@@ -29,7 +49,7 @@ pub fn refuse_private(url: &Url) -> Result<()> {
     }
     for (name, _) in url.query_pairs() {
         let lower = name.to_lowercase();
-        if SECRET_PARAMS.iter().any(|p| lower.contains(p)) {
+        if lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| SECRET_WORDS.contains(&word)) {
             bail!("this link looks private (parameter `{name}`); not sending it to Jina");
         }
     }
@@ -62,7 +82,21 @@ mod tests {
         ] {
             assert!(refuse_private(&Url::parse(bad).unwrap()).is_err(), "{bad}");
         }
-        for ok in ["https://blog.rust-lang.org/2026/10/01/Rust-1.99.0/", "https://e.com/search?q=rust&page=2"] {
+        for bad in [
+            "https://e.com/a?api_key=1",
+            "https://e.com/a?apikey=1",
+            "https://e.com/a?access-token=1",
+            "https://e.com/a?sessionid=1",
+            "https://e.com/a?jwt=x",
+        ] {
+            assert!(refuse_private(&Url::parse(bad).unwrap()).is_err(), "{bad}");
+        }
+        for ok in [
+            "https://blog.rust-lang.org/2026/10/01/Rust-1.99.0/",
+            "https://e.com/search?q=rust&page=2",
+            "https://justjoin.it/job-offers/wroclaw/devops?keyword=devsecops",
+            "https://e.com/?monkey=1&authuser=0&barcode=5",
+        ] {
             assert!(refuse_private(&Url::parse(ok).unwrap()).is_ok(), "{ok}");
         }
     }

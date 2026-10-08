@@ -55,6 +55,8 @@ pub fn extract(html: &str, url: &str) -> Result<Doc> {
     if let Some(doc) = job_posting(html, url) {
         return Ok(doc);
     }
+    let cleaned = strip_consent(html);
+    let html = cleaned.as_str();
     let article = Readability::new(html, Some(url), None).ok().and_then(|mut r| r.parse().ok());
     let Some(article) = article.filter(|a| a.text_content.trim().chars().count() >= MIN_ARTICLE_CHARS) else {
         return Ok(whole_page(html, url));
@@ -74,7 +76,9 @@ pub fn extract(html: &str, url: &str) -> Result<Doc> {
         "extraction": "article",
         "markdown": body,
     });
-    Ok(Doc::new("web", Some(url.to_string()), markdown, data))
+    let doc = Doc::new("web", Some(url.to_string()), markdown, data);
+    // Readability sometimes picks a promo box on listing pages: compare with the whole page.
+    Ok(if doc.markdown.split_whitespace().count() < THIN_ARTICLE_WORDS { richer(doc, whole_page(html, url)) } else { doc })
 }
 
 /// The whole page as Markdown: no scripts, navigation, header/footer or forms; absolute links.
@@ -192,6 +196,55 @@ fn job_posting(html: &str, url: &str) -> Option<Doc> {
     let description = html_to_markdown(&crate::output::unescape(job["description"].as_str()?));
     let markdown = format!("# {title}\n\n{}\n\n{description}", facts.join(" · "));
     Some(Doc::new("web", Some(url.to_string()), markdown, json!({ "title": title, "extraction": "job-posting", "job": job })))
+}
+
+/// Remove cookie/consent banners (known consent frameworks, plus short elements whose
+/// id/class/label says cookie or consent and whose text sounds like a consent prompt),
+/// and unhide the content such a modal hid.
+pub fn strip_consent(html: &str) -> String {
+    const FRAMEWORKS: &str = "#onetrust-consent-sdk, #onetrust-banner-sdk, #CybotCookiebotDialog, #usercentrics-root, \
+        #didomi-host, #cookiescript_injected, #truste-consent-track, .qc-cmp2-container, .cc-window";
+    const CANDIDATES: &str = r#"[id*="ookie"], [class*="ookie"], [id*="onsent"], [class*="onsent"], [aria-label*="ookie"], [aria-label*="onsent"], [role="dialog"], [role="alertdialog"]"#;
+    // Phrases of consent prompts, not of content that merely mentions cookies.
+    const PHRASES: &[&str] = &[
+        "we use cookies",
+        "uses cookies",
+        "use of cookies",
+        "cookie settings",
+        "cookie policy",
+        "cookie preferences",
+        "accept all",
+        "reject all",
+        "decline all",
+        "allow all",
+        "manage preferences",
+        "accept cookies",
+    ];
+    let page = dom_query::Document::from(html);
+    page.select(FRAMEWORKS).remove();
+    for el in page.select(CANDIDATES).iter() {
+        let text = el.text().to_lowercase();
+        if text.chars().count() < 1500 && PHRASES.iter().any(|p| text.contains(p)) {
+            el.remove();
+        }
+    }
+    // While a modal (the banner) is open, libraries hide the whole app behind it with
+    // aria-hidden/inert. Unhide large containers; small decorative ones stay hidden.
+    for el in page.select(r#"[aria-hidden="true"], [inert]"#).iter() {
+        if el.text().chars().count() > 200 {
+            el.remove_attrs(&["aria-hidden", "inert"]);
+        }
+    }
+    page.html().to_string()
+}
+
+/// Words of prose an article needs before we trust Readability over the whole page.
+const THIN_ARTICLE_WORDS: usize = 80;
+
+/// Keep a substantial article; if it is thin, prefer the whole page when that has more text.
+fn richer(article: Doc, page: Doc) -> Doc {
+    let words = |d: &Doc| d.markdown.split_whitespace().count();
+    if words(&article) >= THIN_ARTICLE_WORDS || words(&page) <= words(&article) { article } else { page }
 }
 
 /// Share of visible Markdown text that sits inside `[link text](url)`.
@@ -378,6 +431,53 @@ its community, the compiler, the standard library, and the ecosystem of crates t
             assert!(md.contains(part), "missing {part}: {md}");
         }
         assert!(!md.contains("Similar jobs"));
+    }
+
+    const CONSENT: &str = r#"<html><head><title>Jobs</title></head><body>
+<div id="onetrust-consent-sdk"><p>We use cookies to improve your experience. Accept all? Privacy policy.</p></div>
+<div class="cookie-banner-x"><button>Accept all</button> Our website uses cookies. Decline all. Customize.</div>
+<div role="dialog" aria-label="Cookie consent"><p>This website uses cookies. Save &amp; Close.</p></div>
+<main><h1>DevSecOps Engineer</h1><p>Real listing content about securing CI/CD pipelines in Wrocław.</p></main>
+<section class="cookie-recipe"><h2>Grandma's cookies</h2><p>Mix butter and sugar, then accept that the dough is sticky.
+Bake twelve minutes at 180 degrees, cool on a rack, and share with the whole office team.</p></section>
+</body></html>"#;
+
+    #[test]
+    fn consent_banners_are_removed_before_extraction() {
+        let cleaned = strip_consent(CONSENT);
+        assert!(!cleaned.contains("We use cookies"), "OneTrust");
+        assert!(!cleaned.contains("Our website uses cookies"), "class*=cookie banner");
+        assert!(!cleaned.contains("This website uses cookies"), "consent dialog");
+        assert!(cleaned.contains("Real listing content"));
+        assert!(cleaned.contains("Grandma's cookies"), "content that merely mentions cookies stays");
+        let doc = extract(CONSENT, "https://jobs.example.com/").unwrap();
+        assert!(!doc.markdown.contains("Accept all"), "{}", doc.markdown);
+    }
+
+    #[test]
+    fn a_thin_article_loses_to_a_richer_whole_page() {
+        let promo = Doc::new("web", None, "# Jobs\n\nCreate an account and search smarter.".into(), json!({ "extraction": "article" }));
+        let listing: String = (0..30).map(|i| format!("- DevSecOps Engineer {i} at Company {i}, Wrocław, B2B\n")).collect();
+        let page = Doc::new("web", None, format!("# Jobs\n\n{listing}"), json!({ "extraction": "page" }));
+        assert_eq!(richer(promo.clone(), page.clone()).data["extraction"], "page");
+        let article = Doc::new("web", None, "word ".repeat(400), json!({ "extraction": "article" }));
+        assert_eq!(richer(article, page).data["extraction"], "article", "a real article stays");
+    }
+
+    #[test]
+    fn content_hidden_behind_a_consent_modal_comes_back() {
+        // Modal libraries mark the whole app aria-hidden while the banner is open.
+        let listing: String =
+            (0..20).map(|i| format!("<li><a href=\"/o/{i}\">DevSecOps Engineer {i}</a> Company {i}, Wrocław, 20 000 PLN</li>")).collect();
+        let html = format!(
+            r#"<html><head><title>Offers</title></head><body>
+            <div aria-hidden="true"><main><h1>Offers in Wrocław</h1><ul>{listing}</ul></main></div>
+            <div role="dialog"><p>This website uses cookies. Accept all or Decline all.</p></div>
+            <span aria-hidden="true">★</span></body></html>"#
+        );
+        let doc = extract(&html, "https://jobs.example.com/").unwrap();
+        assert!(doc.markdown.contains("DevSecOps Engineer 7"), "{}", doc.markdown);
+        assert!(!doc.markdown.contains("uses cookies"));
     }
 
     #[test]

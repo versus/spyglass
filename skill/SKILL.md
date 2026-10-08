@@ -29,6 +29,7 @@ One CLI, read-only. Every result is wrapped in `<untrusted source=… url=…>�
 <!--cap:browser-->| Reddit | `spyglass reddit search "<q>" [--sub rust]` · `spyglass reddit sub <name> [--sort top]` · `spyglass reddit post <url>` |
 | What works | `spyglass doctor` |
 
+Public LinkedIn pages (jobs, companies, profile headers) read fine with `spyglass web read`; no login needed.
 Add `--json` for structured output.
 <!--cap:browser-->Search, Reddit and `--render` use a visible "agent browser" window; the user can watch it.
 
