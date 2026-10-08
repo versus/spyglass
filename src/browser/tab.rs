@@ -22,11 +22,20 @@ pub enum Allow {
     AnyPublic,
 }
 
-/// Decide whether the browser may perform a request. Media is always blocked.
-pub fn request_allowed(url: &str, resource_type: &str, allow: &Allow) -> bool {
-    if matches!(resource_type, "Image" | "Media" | "Font") {
+/// A tab's network policy.
+#[derive(Debug, Clone)]
+pub struct Guard {
+    pub allow: Allow,
+    /// Skip images/media/fonts: only when nobody can see the page (headless).
+    pub block_media: bool,
+}
+
+/// Decide whether the browser may perform a request.
+pub fn request_allowed(url: &str, resource_type: &str, guard: &Guard) -> bool {
+    if guard.block_media && matches!(resource_type, "Image" | "Media" | "Font") {
         return false;
     }
+    let allow = &guard.allow;
     if url.starts_with("data:") || url.starts_with("blob:") {
         return true;
     }
@@ -38,12 +47,12 @@ pub fn request_allowed(url: &str, resource_type: &str, allow: &Allow) -> bool {
 
 /// Full decision: the static rules above, then the host must resolve to public
 /// addresses only (Chrome does its own DNS, so a name alone proves nothing).
-pub async fn request_permitted<R, F>(url: &str, resource_type: &str, allow: &Allow, resolve: R) -> bool
+pub async fn request_permitted<R, F>(url: &str, resource_type: &str, guard: &Guard, resolve: R) -> bool
 where
     R: Fn(String) -> F,
     F: std::future::Future<Output = Option<Vec<std::net::IpAddr>>>,
 {
-    if !request_allowed(url, resource_type, allow) {
+    if !request_allowed(url, resource_type, guard) {
         return false;
     }
     // data:/blob: have no host; literal IPs were already checked by the static rules.
@@ -108,7 +117,7 @@ impl Tab {
     /// Open a tab (in `context`, or the persistent profile when `None`).
     /// With `allow`, every request passes the network guard; `None` is only for
     /// user-driven login tabs (SSO flows span arbitrary domains).
-    pub async fn open(cdp: &Cdp, context: Option<&str>, allow: Option<Allow>) -> Result<Tab> {
+    pub async fn open(cdp: &Cdp, context: Option<&str>, guard: Option<Guard>) -> Result<Tab> {
         let mut params = json!({ "url": "about:blank" });
         if let Some(ctx) = context {
             params["browserContextId"] = json!(ctx);
@@ -119,8 +128,8 @@ impl Tab {
             .context("no sessionId")?
             .to_string();
         let s = Some(session.as_str());
-        let guard = match allow {
-            Some(allow) => Some(Self::install_guard(cdp, &session, allow).await?),
+        let guard = match guard {
+            Some(policy) => Some(Self::install_guard(cdp, &session, policy).await?),
             None => None,
         };
         for domain in ["Page.enable", "Network.enable", "Runtime.enable"] {
@@ -130,7 +139,7 @@ impl Tab {
         Ok(Tab { cdp: cdp.clone(), target_id, session, guard, close_on_drop: true })
     }
 
-    async fn install_guard(cdp: &Cdp, session: &str, allow: Allow) -> Result<JoinHandle<()>> {
+    async fn install_guard(cdp: &Cdp, session: &str, guard: Guard) -> Result<JoinHandle<()>> {
         let mut events = cdp.subscribe();
         guard_session(cdp, session, false).await?;
         // Sessions under this guard: the tab plus every worker/frame attached below it.
@@ -169,7 +178,7 @@ impl Tab {
                     let id = ev.params["requestId"].clone();
                     let url = ev.params["request"]["url"].as_str().unwrap_or("").to_string();
                     let kind = ev.params["resourceType"].as_str().unwrap_or("").to_string();
-                    let policy = allow.clone();
+                    let policy = guard.clone();
                     let (cdp, dns) = (cdp.clone(), dns.clone());
                     // Decide off the event loop: a DNS lookup must not stall other requests.
                     tokio::spawn(async move {
@@ -290,7 +299,8 @@ impl Tab {
 mod tests {
     use super::*;
 
-    const REDDIT: Allow = Allow::Domains(&["reddit.com", "redditstatic.com"]);
+    const REDDIT: Guard = Guard { allow: Allow::Domains(&["reddit.com", "redditstatic.com"]), block_media: true };
+    const ANY: Guard = Guard { allow: Allow::AnyPublic, block_media: true };
 
     /// A scripted in-memory Chrome: answers commands, and after `Page.navigate`
     /// emits a stale `load` from the previous navigation before the real one.
@@ -336,7 +346,8 @@ mod tests {
     #[tokio::test]
     async fn workers_and_frames_are_guarded_before_they_run() {
         let (cdp, inject, sent) = recording_chrome();
-        let _tab = Tab::open(&cdp, None, Some(Allow::Domains(&["example.com"]))).await.unwrap().keep_open();
+        let guard = Guard { allow: Allow::Domains(&["example.com"]), block_media: true };
+        let _tab = Tab::open(&cdp, None, Some(guard)).await.unwrap().keep_open();
         let auto = sent.lock().unwrap().iter().find(|m| m["method"] == "Target.setAutoAttach" && m["sessionId"] == "S1").cloned();
         let auto = auto.expect("auto-attach to child targets");
         assert_eq!(auto["params"]["waitForDebuggerOnStart"], true);
@@ -388,17 +399,25 @@ mod tests {
     }
 
     #[test]
-    fn media_is_always_blocked() {
+    fn media_is_loaded_in_the_visible_browser() {
+        // A person may be looking (or solving an image captcha): images must load there.
+        let visible = Guard { allow: Allow::Domains(&["reddit.com"]), block_media: false };
+        assert!(request_allowed("https://www.reddit.com/a.png", "Image", &visible));
+        assert!(!request_allowed("https://evil.com/a.png", "Image", &visible), "domains still apply");
+    }
+
+    #[test]
+    fn media_is_blocked_headless() {
         for kind in ["Image", "Media", "Font"] {
             assert!(!request_allowed("https://www.reddit.com/a.png", kind, &REDDIT));
-            assert!(!request_allowed("https://cdn.example.com/a.png", kind, &Allow::AnyPublic));
+            assert!(!request_allowed("https://cdn.example.com/a.png", kind, &ANY));
         }
     }
 
     #[test]
     fn any_public_still_blocks_private_and_odd_schemes() {
-        assert!(request_allowed("https://example.com/", "Document", &Allow::AnyPublic));
-        assert!(request_allowed("http://example.com/", "Document", &Allow::AnyPublic));
+        assert!(request_allowed("https://example.com/", "Document", &ANY));
+        assert!(request_allowed("http://example.com/", "Document", &ANY));
         for bad in [
             "http://127.0.0.1:8080/",
             "http://192.168.0.1/admin",
@@ -407,7 +426,7 @@ mod tests {
             "chrome://settings",
             "ws://example.com/",
         ] {
-            assert!(!request_allowed(bad, "Document", &Allow::AnyPublic), "{bad}");
+            assert!(!request_allowed(bad, "Document", &ANY), "{bad}");
         }
     }
 
@@ -421,9 +440,9 @@ mod tests {
         let public = |_: String| async { ips(&["93.184.216.34"]) };
         let unknown = |_: String| async { None };
         let url = "https://rebind.attacker.example/latest/meta-data/";
-        assert!(!request_permitted(url, "Document", &Allow::AnyPublic, private).await, "DNS rebinding to loopback");
-        assert!(!request_permitted(url, "Document", &Allow::AnyPublic, unknown).await);
-        assert!(request_permitted(url, "Document", &Allow::AnyPublic, public).await);
+        assert!(!request_permitted(url, "Document", &ANY, private).await, "DNS rebinding to loopback");
+        assert!(!request_permitted(url, "Document", &ANY, unknown).await);
+        assert!(request_permitted(url, "Document", &ANY, public).await);
         assert!(!request_permitted("https://www.reddit.com/", "Document", &REDDIT, private).await);
         assert!(request_permitted("https://www.reddit.com/", "Document", &REDDIT, public).await);
     }

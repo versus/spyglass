@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, mpsc};
 use super::cdp::Cdp;
 use super::proto::{Reply, Request};
 use super::scenario::{Blocked, Ctx, Found, NAV_TIMEOUT, Site, require_visible};
-use super::tab::Tab;
+use super::tab::{Guard, Tab};
 use super::{chrome, ddg, reddit, render, x};
 
 const MAX_REQUEST: u64 = 64 * 1024;
@@ -320,8 +320,9 @@ async fn run_job(
         true => Some(Scratch::create(&cdp).await?),
         false => None,
     };
-    let tab = Tab::open(&cdp, scratch.as_ref().map(|s| s.id.as_str()), Some(site.allow.clone())).await?;
     let headless = !visible || state.headless_only;
+    let guard = Guard { allow: site.allow.clone(), block_media: headless };
+    let tab = Tab::open(&cdp, scratch.as_ref().map(|s| s.id.as_str()), Some(guard)).await?;
     let ctx = Ctx { cdp: &cdp, tab: &tab, notify, headless };
     log(&format!("job {platform} {verb} ({})", if headless { "headless" } else { "visible" }));
     let found = match platform {
