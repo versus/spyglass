@@ -339,3 +339,21 @@ async fn run_job(
     }
     found
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::testkit::{position, recording_chrome};
+
+    #[tokio::test]
+    async fn a_cancelled_job_still_disposes_its_cookie_less_context() {
+        let (cdp, _inject, sent) = recording_chrome();
+        let scratch = Scratch::create(&cdp).await.unwrap();
+        drop(scratch); // the job was aborted: no explicit dispose()
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let disposed =
+            sent.lock().unwrap().iter().any(|m| m["method"] == "Target.disposeBrowserContext" && m["params"]["browserContextId"] == "C1");
+        assert!(disposed, "context left behind for the next job");
+        assert!(position(&sent, "Target.createBrowserContext", "").is_some());
+    }
+}

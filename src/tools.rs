@@ -58,8 +58,10 @@ pub async fn run_with(name: &str, args: &[&str], timeout: Duration, max_bytes: u
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        .process_group(0) // its own group, so helpers it starts (e.g. deno) can be killed with it
         .spawn()
         .with_context(|| format!("starting {name}"))?;
+    let _group = child.id().map(KillGroup); // whatever happens below, nothing outlives this call
     let mut stdout = child.stdout.take().context("no stdout")?;
     let mut stderr = child.stderr.take().context("no stderr")?;
     // Drain stderr concurrently so a chatty child cannot block; keep only the head.
@@ -90,7 +92,9 @@ pub async fn run_with(name: &str, args: &[&str], timeout: Duration, max_bytes: u
         Err(_) => bail!("{name} timed out after {}s", timeout.as_secs_f32()),
     };
     if !status.success() {
-        let err = String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).into_owned();
+        // A grandchild may hold stderr open after the child exited: don't wait for it long.
+        let head = tokio::time::timeout(Duration::from_secs(1), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default();
+        let err = String::from_utf8_lossy(&head).into_owned();
         let excerpt: String = err.chars().take(500).collect();
         bail!("{name} failed ({status}): {}", excerpt.trim());
     }
@@ -98,6 +102,20 @@ pub async fn run_with(name: &str, args: &[&str], timeout: Duration, max_bytes: u
 }
 
 const STDERR_KEEP: usize = 64 * 1024;
+
+/// Kills a whole process group (the child and anything it started) on drop.
+struct KillGroup(u32);
+
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", self.0)])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
 
 /// Private temporary directory removed on drop.
 struct ScratchDir(PathBuf);
@@ -167,6 +185,22 @@ mod tests {
     async fn enforces_timeout_and_output_cap() {
         assert!(run("sleep", &["5"], Duration::from_millis(200), 100).await.is_err());
         assert!(run("yes", &[], T, 1000).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_grandchild_holding_stderr_cannot_outlive_the_timeout() {
+        let started = std::time::Instant::now();
+        let r = run("sh", &["-c", "sleep 30 1>&2 & exit 3"], Duration::from_secs(5), 1024).await;
+        assert!(r.is_err());
+        assert!(started.elapsed() < Duration::from_secs(8), "hung on stderr: {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn leftover_grandchildren_are_killed() {
+        let pid = run("sh", &["-c", "sleep 30 1>&2 & echo $!"], T, 1024).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let alive = std::process::Command::new("kill").args(["-0", pid.trim()]).stderr(Stdio::null()).status().unwrap().success();
+        assert!(!alive, "grandchild {pid} still running");
     }
 
     #[tokio::test]

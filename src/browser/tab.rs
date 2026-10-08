@@ -1,7 +1,7 @@
 //! One browser tab driven by a fixed scenario: network allowlist, navigation,
 //! JSON response capture, evaluation of our own (never agent-supplied) scripts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +54,19 @@ where
         Some(addrs) if !addrs.is_empty() => addrs.iter().all(|ip| crate::validate::is_public_ip(*ip)),
         _ => false,
     }
+}
+
+/// Intercept every request of a target, and pause its own children (workers, frames) on start.
+/// Interception is mandatory; nested auto-attach is too for the tab, best effort for children
+/// (a worker rarely has children of its own and may not support it).
+async fn guard_session(cdp: &Cdp, session: &str, child: bool) -> Result<()> {
+    cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] }), Some(session)).await?;
+    let auto = json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true });
+    let attached = cdp.call("Target.setAutoAttach", auto, Some(session)).await;
+    if !child {
+        attached?;
+    }
+    Ok(())
 }
 
 async fn cached_resolve(cache: Arc<std::sync::Mutex<HashMap<String, Option<Vec<IpAddr>>>>>, host: String) -> Option<Vec<IpAddr>> {
@@ -119,11 +132,13 @@ impl Tab {
 
     async fn install_guard(cdp: &Cdp, session: &str, allow: Allow) -> Result<JoinHandle<()>> {
         let mut events = cdp.subscribe();
-        cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] }), Some(session)).await?;
+        guard_session(cdp, session, false).await?;
+        // Sessions under this guard: the tab plus every worker/frame attached below it.
+        let guarded: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new([session.to_string()].into()));
         // Per-tab DNS cache: host -> resolved addresses (None = did not resolve).
         let dns: Arc<std::sync::Mutex<HashMap<String, Option<Vec<IpAddr>>>>> = Arc::default();
         Ok(tokio::spawn({
-            let (cdp, session) = (cdp.clone(), session.to_string());
+            let cdp = cdp.clone();
             async move {
                 loop {
                     let ev = match events.recv().await {
@@ -131,14 +146,31 @@ impl Tab {
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => break,
                     };
-                    if ev.method != "Fetch.requestPaused" || ev.session.as_deref() != Some(session.as_str()) {
+                    let Some(session) = ev.session.clone() else { continue };
+                    if !guarded.lock().unwrap_or_else(|e| e.into_inner()).contains(&session) {
+                        continue;
+                    }
+                    if ev.method == "Target.attachedToTarget" {
+                        // A worker, service worker or cross-site frame, paused before it runs:
+                        // put the same guard on it first, then let it go. If that fails it stays paused.
+                        let Some(child) = ev.params["sessionId"].as_str().map(str::to_string) else { continue };
+                        guarded.lock().unwrap_or_else(|e| e.into_inner()).insert(child.clone());
+                        let cdp = cdp.clone();
+                        tokio::spawn(async move {
+                            if guard_session(&cdp, &child, true).await.is_ok() {
+                                let _ = cdp.call("Runtime.runIfWaitingForDebugger", json!({}), Some(&child)).await;
+                            }
+                        });
+                        continue;
+                    }
+                    if ev.method != "Fetch.requestPaused" {
                         continue;
                     }
                     let id = ev.params["requestId"].clone();
                     let url = ev.params["request"]["url"].as_str().unwrap_or("").to_string();
                     let kind = ev.params["resourceType"].as_str().unwrap_or("").to_string();
                     let policy = allow.clone();
-                    let (cdp, session, dns) = (cdp.clone(), session.clone(), dns.clone());
+                    let (cdp, dns) = (cdp.clone(), dns.clone());
                     // Decide off the event loop: a DNS lookup must not stall other requests.
                     tokio::spawn(async move {
                         let ok = request_permitted(&url, &kind, &policy, |host| cached_resolve(dns.clone(), host)).await;
@@ -297,6 +329,34 @@ mod tests {
             }
         });
         (Cdp::new(out_tx, in_rx), real_load_sent)
+    }
+
+    use crate::browser::testkit::{position, recording_chrome};
+
+    #[tokio::test]
+    async fn workers_and_frames_are_guarded_before_they_run() {
+        let (cdp, inject, sent) = recording_chrome();
+        let _tab = Tab::open(&cdp, None, Some(Allow::Domains(&["example.com"]))).await.unwrap().keep_open();
+        let auto = sent.lock().unwrap().iter().find(|m| m["method"] == "Target.setAutoAttach" && m["sessionId"] == "S1").cloned();
+        let auto = auto.expect("auto-attach to child targets");
+        assert_eq!(auto["params"]["waitForDebuggerOnStart"], true);
+        assert_eq!(auto["params"]["flatten"], true);
+
+        // Chrome reports a paused worker attached under the tab's session.
+        let attached = json!({ "method": "Target.attachedToTarget", "sessionId": "S1",
+            "params": { "sessionId": "W1", "targetInfo": { "type": "worker" }, "waitingForDebugger": true } });
+        inject.send(attached.to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let fetch = position(&sent, "Fetch.enable", "W1").expect("guard on the worker");
+        let resume = position(&sent, "Runtime.runIfWaitingForDebugger", "W1").expect("worker resumed");
+        assert!(fetch < resume, "the guard must be in place before the worker runs");
+
+        // The worker's request to a foreign host is blocked.
+        let paused = json!({ "method": "Fetch.requestPaused", "sessionId": "W1",
+            "params": { "requestId": "R9", "request": { "url": "https://evil.example.net/x" }, "resourceType": "XHR" } });
+        inject.send(paused.to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(position(&sent, "Fetch.failRequest", "W1").is_some());
     }
 
     #[tokio::test]

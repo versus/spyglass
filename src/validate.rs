@@ -72,8 +72,11 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 || v6.is_multicast()
                 || (seg[0] & 0xfe00) == 0xfc00 // unique local
                 || (seg[0] & 0xffc0) == 0xfe80 // link local
+                || (seg[0] & 0xffc0) == 0xfec0 // site local (deprecated, still routed internally)
                 || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
-                || (seg[0] == 0x2001 && seg[1] == 0) // Teredo
+                || (seg[0] == 0x2001 && seg[1] < 0x0200) // 2001::/23 IETF protocol assignments (Teredo, benchmarking, ORCHID…)
+                || (seg[0] & 0xfff0) == 0x3ff0 // 3fff::/20 documentation
+                || seg[0] == 0x5f00 // 5f00::/16 SRv6 SIDs
                 || seg[0] == 0x2002 // 6to4 (may embed private v4)
                 || (seg[0] == 0x64 && seg[1] == 0xff9b) // NAT64
                 || (seg[0] == 0x100 && seg[1..4] == [0, 0, 0]) // discard
@@ -241,6 +244,17 @@ mod tests {
             "2001:db8::1",
         ] {
             assert!(!is_public_ip(ip.parse().unwrap()), "{ip} must not be public");
+        }
+    }
+
+    #[test]
+    fn internal_and_reserved_ipv6_ranges_are_not_public() {
+        for ip in ["fec0::1", "feff::1", "2001:2::1", "2001:10::1", "2001:20::1", "2001:1ff::1", "3fff::1", "5f00::1"] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip} must not be public");
+        }
+        // Real global unicast still passes (Google, Cloudflare).
+        for ip in ["2001:4860:4860::8888", "2606:4700:4700::1111", "2a00:1450:4001::1"] {
+            assert!(is_public_ip(ip.parse().unwrap()), "{ip} is public");
         }
     }
 
