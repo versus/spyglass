@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use super::scenario::{Ctx, Found, Site, arg_str, arg_usize, scrape, when_ready};
+use super::scenario::{Ctx, Found, Site, arg_str, arg_usize, scrape, solve_by_user, when_ready};
 use super::tab::Allow;
 use crate::output::{oneline, str_at as s};
 use crate::validate::{self, enc};
@@ -13,6 +13,9 @@ pub const LOGIN_URL: &str = "https://www.reddit.com/login/";
 pub const SITE: Site =
     Site { allow: Allow::Domains(&["reddit.com", "redditstatic.com", "redditmedia.com"]), scratch: false, visible: true };
 pub const BLOCKED_MARKER: &str = "blocked by network security";
+/// Title of Reddit's bot check; a person can pass it in the visible window.
+/// English only: if Reddit ever localizes it, detection falls back to the blocked/empty paths.
+pub const CHALLENGE_TITLE: &str = "Prove your humanity";
 pub const SEARCH_READY: &str = r#"a[data-testid="post-title"]"#;
 /// Comments render after the post; a post without comments has nothing more to wait for.
 pub const POST_READY: &str = r#"shreddit-comment, shreddit-post[comment-count="0"]"#;
@@ -174,8 +177,22 @@ pub async fn job(ctx: &Ctx<'_>, verb: &str, args: &Value) -> Result<Found> {
         "post" => (post_url(arg_str(args, "post")?)?, POST_READY, POST_JS),
         _ => bail!("unknown reddit command {verb}"),
     };
-    let script = when_ready(ready, BLOCKED_MARKER, script);
-    let v = scrape(ctx.tab, &url, &script).await?;
+    let script = when_ready(ready, BLOCKED_MARKER, Some(CHALLENGE_TITLE), script);
+    let challenged = |v: &Value| v["challenge"] == true;
+    let mut v = scrape(ctx.tab, &url, &script).await?;
+    if challenged(&v) {
+        // While the person works on the check, only watch the title: no reloads under their hands.
+        solve_by_user(ctx, "A Reddit bot check", || async {
+            let title = ctx.tab.eval("document.title").await.ok()?;
+            (!title.as_str()?.contains(CHALLENGE_TITLE)).then_some(())
+        })
+        .await?;
+        // Reddit may not return to our page afterwards: load it once more.
+        v = scrape(ctx.tab, &url, &script).await?;
+        if challenged(&v) {
+            bail!("Reddit showed its bot check again; try later, or log in: `spyglass browser login reddit`");
+        }
+    }
     if v["blocked"] == true {
         bail!(
             "Reddit blocked the agent browser. Use the visible mode (`spyglass browser start`) or log in: `spyglass browser login reddit`"
@@ -194,6 +211,68 @@ pub async fn job(ctx: &Ctx<'_>, verb: &str, args: &Value) -> Result<Found> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_repeated_bot_check_fails_fast_instead_of_reloading_in_a_loop() {
+        use crate::browser::tab::Tab;
+        use crate::browser::testkit::{eval_result, scripted_chrome};
+        use std::time::Duration;
+
+        // The title changes once, but every load shows the check again.
+        let (cdp, _inject, sent) = scripted_chrome(|m| {
+            if m["method"] != "Runtime.evaluate" {
+                return None;
+            }
+            let title = if m["params"]["expression"] == "document.title" { json!("r/rust") } else { json!({ "challenge": true }) };
+            Some(eval_result(title))
+        });
+        let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
+        let (notify, _waiting) = tokio::sync::mpsc::channel(8);
+        let ctx = Ctx { cdp: &cdp, tab: &tab, notify: &notify, headless: false };
+
+        let result = tokio::time::timeout(Duration::from_secs(15), job(&ctx, "sub", &json!({ "name": "rust" }))).await;
+        let err = result.expect("must not keep reloading for two minutes").unwrap_err().to_string();
+        assert!(err.contains("bot check"), "{err}");
+        let navigations = sent.lock().unwrap().iter().filter(|m| m["method"] == "Page.navigate").count();
+        assert_eq!(navigations, 2);
+    }
+
+    #[tokio::test]
+    async fn bot_check_is_handed_to_the_user_then_the_page_is_loaded_once_more() {
+        use crate::browser::proto::Reply;
+        use crate::browser::tab::Tab;
+        use crate::browser::testkit::{eval_result, scripted_chrome};
+        use std::sync::{Arc, Mutex};
+
+        // Polls see the check twice more, then Reddit's normal title.
+        let titles = Arc::new(Mutex::new(vec!["Prove your humanity", "Prove your humanity"].into_iter()));
+        let scrapes = Arc::new(Mutex::new(0));
+        let (cdp, _inject, sent) = scripted_chrome({
+            let (titles, scrapes) = (titles.clone(), scrapes.clone());
+            move |m| {
+                if m["method"] != "Runtime.evaluate" {
+                    return None;
+                }
+                if m["params"]["expression"] == "document.title" {
+                    return Some(eval_result(json!(titles.lock().unwrap().next().unwrap_or("r/rust"))));
+                }
+                let mut n = scrapes.lock().unwrap();
+                *n += 1;
+                let post =
+                    json!([{ "title": "Rust 1.99.0 is out", "author": "a", "subreddit": "r/rust", "permalink": "/r/rust/comments/1/x/" }]);
+                Some(eval_result(if *n == 1 { json!({ "challenge": true }) } else { json!({ "data": post }) }))
+            }
+        });
+        let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
+        let (notify, mut waiting) = tokio::sync::mpsc::channel(8);
+        let ctx = Ctx { cdp: &cdp, tab: &tab, notify: &notify, headless: false };
+
+        let found = job(&ctx, "sub", &json!({ "name": "rust", "limit": 5 })).await.unwrap();
+        assert!(found.markdown.contains("Rust 1.99.0 is out"), "{}", found.markdown);
+        let navigations = sent.lock().unwrap().iter().filter(|m| m["method"] == "Page.navigate").count();
+        assert_eq!(navigations, 2, "one load and one reload after the check; none while the user works");
+        assert!(matches!(waiting.try_recv(), Ok(Reply::Waiting { .. })), "the agent is told to wait");
+    }
     use serde_json::json;
 
     #[test]

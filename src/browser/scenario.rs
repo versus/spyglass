@@ -43,6 +43,7 @@ impl std::fmt::Display for Blocked {
 impl std::error::Error for Blocked {}
 
 /// What every scenario returns.
+#[derive(Debug)]
 pub struct Found {
     pub url: Option<String>,
     pub markdown: String,
@@ -70,12 +71,20 @@ pub async fn scrape(tab: &Tab, url: &str, script: &str) -> Result<Value> {
 }
 
 /// Page script: wait (≤10 s) until `ready` matches or the block page shows, then extract.
-pub fn when_ready(ready: &str, blocked_marker: &str, extract: &str) -> String {
+pub fn when_ready(ready: &str, blocked_marker: &str, challenge_title: Option<&str>, extract: &str) -> String {
+    let js = |text: &str| serde_json::to_string(text).unwrap_or_default(); // a JS string literal
+    // A bot check can appear while we wait (scripts may swap it in after load): check every tick.
+    let challenge = challenge_title
+        .map(|t| format!("if (document.title.includes({})) return resolve({{ challenge: true }});", js(t)))
+        .unwrap_or_default();
     format!(
         "new Promise(resolve => {{ const t0 = Date.now(); const tick = () => {{
-            if ((document.body?.innerText || '').includes({blocked_marker:?})) return resolve({{ blocked: true }});
-            if (document.querySelector({ready:?}) || Date.now() - t0 > 10000) return resolve({{ data: {extract} }});
-            setTimeout(tick, 250); }}; tick(); }})"
+            {challenge}
+            if ((document.body?.innerText || '').includes({blocked})) return resolve({{ blocked: true }});
+            if (document.querySelector({ready}) || Date.now() - t0 > 10000) return resolve({{ data: {extract} }});
+            setTimeout(tick, 250); }}; tick(); }})",
+        blocked = js(blocked_marker),
+        ready = js(ready),
     )
 }
 
@@ -89,13 +98,16 @@ pub fn require_visible(headless: bool, need: &str) -> Result<()> {
 }
 
 pub async fn ask_user(notify: &mpsc::Sender<Reply>, message: &str) {
-    // notify-send needs the session bus and display; nothing else is passed.
-    let session = crate::tools::Extra {
-        pass_env: &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"],
-        ..Default::default()
-    };
-    let args = ["--app-name=spyglass", "--", "spyglass", message];
-    let _ = crate::tools::run_with("notify-send", &args, Duration::from_secs(5), 1024, &session).await;
+    #[cfg(not(test))] // no desktop notifications while tests run
+    {
+        // notify-send needs the session bus and display; nothing else is passed.
+        let session = crate::tools::Extra {
+            pass_env: &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"],
+            ..Default::default()
+        };
+        let args = ["--app-name=spyglass", "--", "spyglass", message];
+        let _ = crate::tools::run_with("notify-send", &args, Duration::from_secs(5), 1024, &session).await;
+    }
     let _ = notify.send(Reply::Waiting { message: message.to_string() }).await;
 }
 
@@ -180,6 +192,16 @@ pub async fn capture_graphql(tab: &Tab, url: &str, op: &str, wait: Duration) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn when_ready_watches_for_a_challenge_on_every_tick() {
+        let js = when_ready(r#"a[data-x="y"]"#, "blocked", Some("Prove your humanity"), "42");
+        let tick = &js[js.find("const tick").unwrap()..];
+        assert!(tick.contains(r#"document.title.includes("Prove your humanity")"#), "{js}");
+        assert!(tick.contains("challenge: true"));
+        assert!(js.contains(&serde_json::to_string(r#"a[data-x="y"]"#).unwrap()), "JS string literals: {js}");
+        assert!(!when_ready("x", "blocked", None, "1").contains("challenge"));
+    }
 
     #[test]
     fn handoff_needs_a_visible_browser() {
