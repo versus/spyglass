@@ -5,6 +5,7 @@ plus a ~550-token skill. A clean-room replacement for Agent-Reach.
 
 ```
 spyglass web read <url> [--render] [--links] [--via-jina]
+spyglass web download <url> -o <file>  (agent browser, cookie-less; up to 200 MB)
 spyglass github repo|readme|file|search-repos|search-code|issues|issue|prs|pr|releases
 spyglass search "<query>"               spyglass youtube video|transcript|search
 spyglass rss <url>                      spyglass reddit search|sub|post        (agent browser, no login)

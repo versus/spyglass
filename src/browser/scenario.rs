@@ -28,6 +28,8 @@ pub struct Ctx<'a> {
     pub notify: &'a mpsc::Sender<Reply>,
     /// No window: nobody can solve a captcha or log in.
     pub headless: bool,
+    /// The cookie-less browser context of this job, if any.
+    pub context: Option<&'a str>,
 }
 
 /// The page is a bot wall: the daemon retries in the visible browser.
@@ -149,7 +151,7 @@ pub async fn ensure_session(
     login_url: &str,
     wait: Duration,
 ) -> Result<()> {
-    let Ctx { cdp, tab, notify, headless } = *ctx;
+    let Ctx { cdp, tab, notify, headless, .. } = *ctx;
     if tab.cookie(cookie_url, cookie).await?.is_some() {
         return Ok(());
     }

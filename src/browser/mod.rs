@@ -3,6 +3,7 @@ pub mod chrome;
 pub mod client;
 pub mod daemon;
 pub mod ddg;
+pub mod download;
 pub mod proto;
 pub mod reddit;
 pub mod render;

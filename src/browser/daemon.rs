@@ -18,7 +18,7 @@ use super::cdp::Cdp;
 use super::proto::{Reply, Request};
 use super::scenario::{Blocked, Ctx, Found, NAV_TIMEOUT, Site, require_visible};
 use super::tab::{Guard, Tab};
-use super::{chrome, ddg, reddit, render, x};
+use super::{chrome, ddg, download, reddit, render, x};
 
 const MAX_REQUEST: u64 = 64 * 1024;
 
@@ -323,12 +323,13 @@ async fn run_job(
     let headless = !visible || state.headless_only;
     let guard = Guard { allow: site.allow.clone(), block_media: headless };
     let tab = Tab::open(&cdp, scratch.as_ref().map(|s| s.id.as_str()), Some(guard)).await?;
-    let ctx = Ctx { cdp: &cdp, tab: &tab, notify, headless };
+    let ctx = Ctx { cdp: &cdp, tab: &tab, notify, headless, context: scratch.as_ref().map(|s| s.id.as_str()) };
     log(&format!("job {platform} {verb} ({})", if headless { "headless" } else { "visible" }));
-    let found = match platform {
-        "reddit" => reddit::job(&ctx, verb, args).await,
-        "x" => x::job(&ctx, verb, args).await,
-        "search" => ddg::job(&ctx, verb, args).await,
+    let found = match (platform, verb) {
+        ("web", "download") => download::job(&ctx, args).await,
+        ("reddit", _) => reddit::job(&ctx, verb, args).await,
+        ("x", _) => x::job(&ctx, verb, args).await,
+        ("search", _) => ddg::job(&ctx, verb, args).await,
         _ => render::job(&ctx, verb, args).await,
     };
     if let Err(e) = &found {
