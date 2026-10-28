@@ -10,6 +10,15 @@ ignore = [
     # skrifa. If a vulnerability is reported: patch it ourselves or switch to a maintained fork
     # (via [patch.crates-io]); PDF support is not a core feature, so disabling it is the fallback.
     { id = "RUSTSEC-2026-0192", reason = "unmaintained, no known vulnerability; isolated PDF parsing" },
+    # zvariant / zvariant_derive / zbus_names are unmaintained (no known vulnerabilities): the
+    # zbus 5.x satellite crates were merged into zbus 6 as its `wire` module, and no fixed
+    # 5.x releases exist. They come in transitively via keyring -> zbus-secret-service-keyring-store
+    # -> secret-service -> zbus; keyring 4.2.0 (latest) has not migrated to zbus 6 yet.
+    # Revisit when keyring moves to zbus 6. If a vulnerability is reported: drop keyring
+    # support (credential storage is optional) or [patch.crates-io] to a maintained fork.
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained zvariant, no known vulnerability; transitive via keyring, no 5.x fix" },
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained zbus_names, no known vulnerability; transitive via keyring, no 5.x fix" },
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained zvariant_derive, no known vulnerability; transitive via keyring, no 5.x fix" },
 ]
 
 [licenses]
