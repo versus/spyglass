@@ -282,6 +282,13 @@ enum WebCmd {
         #[arg(long, conflicts_with = "render")]
         via_jina: bool,
     },
+    /// Download a file through the agent browser (cookie-less context, bot checks handed to you).
+    Download {
+        url: String,
+        /// Where to save it (never overwritten).
+        #[arg(short, long)]
+        output: std::path::PathBuf,
+    },
 }
 
 impl Cmd {
@@ -291,6 +298,7 @@ impl Cmd {
             Cmd::Web(WebCmd::Read { via_jina: true, .. }) => "web read --via-jina",
             Cmd::Web(WebCmd::Read { render: false, .. }) => "web read",
             Cmd::Web(WebCmd::Read { render: true, .. }) => "web read --render",
+            Cmd::Web(WebCmd::Download { .. }) => "web download",
             Cmd::Reddit(_) => "reddit",
             Cmd::X(_) => "x",
             Cmd::Browser(_) => "browser",
@@ -316,6 +324,7 @@ async fn run(cmd: &Cmd) -> Result<Out> {
         Cmd::Web(WebCmd::Read { url, render: true, links, .. }) => {
             return browser::client::doc("web", "render", serde_json::json!({ "url": url, "links": links })).await.map(Out::Doc);
         }
+        Cmd::Web(WebCmd::Download { url, output }) => return web_download(url, output).await.map(Out::Doc),
         _ => {}
     }
     let net = net::Net::new()?;
@@ -329,11 +338,29 @@ async fn run(cmd: &Cmd) -> Result<Out> {
         Cmd::Youtube(YtCmd::Transcript { video, lang }) => platforms::youtube::transcript(&net, video, lang).await?,
         Cmd::Youtube(YtCmd::Search { query, limit }) => platforms::youtube::search(query, lim(*limit)).await?,
         Cmd::Youtube(YtCmd::Comments { video, limit }) => platforms::youtube::comments(video, lim(*limit)).await?,
-        Cmd::Secrets(_) | Cmd::Browser(_) | Cmd::Reddit(_) | Cmd::X(_) | Cmd::Doctor | Cmd::Skill { .. } => {
+        Cmd::Web(WebCmd::Download { .. })
+        | Cmd::Secrets(_)
+        | Cmd::Browser(_)
+        | Cmd::Reddit(_)
+        | Cmd::X(_)
+        | Cmd::Doctor
+        | Cmd::Skill { .. } => {
             unreachable!("handled above")
         }
     };
     Ok(Out::Doc(doc))
+}
+
+async fn web_download(url: &str, output: &std::path::Path) -> Result<Doc> {
+    // Fail before downloading, not after.
+    if output.exists() {
+        anyhow::bail!("{} already exists", output.display());
+    }
+    let mut doc = browser::client::doc("web", "download", serde_json::json!({ "url": url })).await?;
+    browser::download::take(doc.data["guid"].as_str().unwrap_or(""), output)?;
+    doc.markdown = format!("{} to {}", doc.markdown, output.display());
+    doc.data["path"] = serde_json::json!(output);
+    Ok(doc)
 }
 
 async fn github_cmd(net: &net::Net, cmd: &GhCmd) -> Result<Doc> {
@@ -478,6 +505,8 @@ mod tests {
         assert!(parse(&["browser", "login", "x"]).is_ok());
         assert!(parse(&["web", "read", "--via-jina", "https://example.com"]).is_ok());
         assert!(parse(&["web", "read", "--via-jina", "--render", "https://example.com"]).is_err(), "pick one way to fetch");
+        assert!(parse(&["web", "download", "https://e.com/a.pdf", "-o", "a.pdf"]).is_ok());
+        assert!(parse(&["web", "download", "https://e.com/a.pdf"]).is_err(), "the output path is required");
     }
 
     #[test]

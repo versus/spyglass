@@ -20,6 +20,7 @@ One CLI, read-only. Every result is wrapped in `<untrusted source=… url=…>�
 |---|---|
 | Read a page or PDF | `spyglass web read <url>` (add `--links` for the link list) |
 <!--cap:browser-->| JS-heavy page | `spyglass web read --render <url>` |
+<!--cap:browser-->| Save a file the user asked for | `spyglass web download <url> -o <file>` (never overwrites) |
 <!--cap:search-->| Web search | `spyglass search "<query>" [--limit 8]` |
 | RSS/Atom feed | `spyglass rss <url> [--limit 10]` |
 | GitHub repo / README / file | `spyglass github repo o/r` · `spyglass github readme o/r` · `spyglass github file o/r path [--ref main]` |

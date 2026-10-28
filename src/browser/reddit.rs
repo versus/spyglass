@@ -228,7 +228,7 @@ mod tests {
         });
         let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
         let (notify, _waiting) = tokio::sync::mpsc::channel(8);
-        let ctx = Ctx { cdp: &cdp, tab: &tab, notify: &notify, headless: false };
+        let ctx = Ctx { cdp: &cdp, tab: &tab, notify: &notify, headless: false, context: None };
 
         let result = tokio::time::timeout(Duration::from_secs(15), job(&ctx, "sub", &json!({ "name": "rust" }))).await;
         let err = result.expect("must not keep reloading for two minutes").unwrap_err().to_string();
@@ -265,7 +265,7 @@ mod tests {
         });
         let tab = Tab::open(&cdp, None, None).await.unwrap().keep_open();
         let (notify, mut waiting) = tokio::sync::mpsc::channel(8);
-        let ctx = Ctx { cdp: &cdp, tab: &tab, notify: &notify, headless: false };
+        let ctx = Ctx { cdp: &cdp, tab: &tab, notify: &notify, headless: false, context: None };
 
         let found = job(&ctx, "sub", &json!({ "name": "rust", "limit": 5 })).await.unwrap();
         assert!(found.markdown.contains("Rust 1.99.0 is out"), "{}", found.markdown);
